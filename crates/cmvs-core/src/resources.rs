@@ -59,6 +59,7 @@ struct OpenArchive {
 pub struct ResourceArchives {
     root: PathBuf,
     open: BTreeMap<(u16, u32), OpenArchive>,
+    patches: crate::patch::Images,
     parameters: BTreeMap<(u16, u32), Cpz7Parameters>,
 }
 
@@ -69,6 +70,7 @@ impl ResourceArchives {
             return Err("resource root is not a directory".into());
         }
         Ok(Self {
+            patches: crate::patch::Images::new(&root),
             root,
             open: BTreeMap::new(),
             parameters: BTreeMap::new(),
@@ -175,6 +177,21 @@ pub struct RegisteredResources<'a> {
 
 impl ResourceSource for RegisteredResources<'_> {
     fn read(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+        if self.command == ResourceKind::Image.command()
+            && let Some(bytes) = self.archives.patches.read(name)?
+        {
+            return Ok(Some(bytes));
+        }
+        if self.command == ResourceKind::SceneMovie.command() && name.is_ascii() {
+            // The patch redirects movie files by basename before the original registrations.
+            let key = crate::patch::basename(name)?;
+            if let Some(bytes) = self
+                .archives
+                .read_file(&[b"Pk/", key.as_bytes()].concat())?
+            {
+                return Ok(Some(bytes));
+            }
+        }
         for slot in 0..self.entries {
             let Some(path) = self
                 .paths

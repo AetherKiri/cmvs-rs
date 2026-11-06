@@ -1,16 +1,9 @@
 //! Auxiliary text content: 0x238b layout (0x14002f3e0), 0x2390 measurement (0x14002f120)
 //! and the glyph half of the 0x14002edb0 frame update, which attaches glyphs inside the
 //! bounds to atlas cells and detaches the others. Addresses refer to the documented binary.
-use super::{
-    auxiliary::{AuxiliaryGlyph, AuxiliaryText},
-    measure::lead,
-};
+use super::auxiliary::{AuxiliaryGlyph, AuxiliaryText};
 use crate::FormatError;
 
-/// 0x8141 、 0x8142 。 0x8176 」 0x8178 』 stay on the full line while +128 is set.
-const NO_BREAK: [u16; 4] = [0x8141, 0x8142, 0x8176, 0x8178];
-/// 0x814a ゛ is drawn a fifth of the size to the left and advances less.
-const VOICED_MARK: u16 = 0x814a;
 /// 0x14002eb10 searches cells 1..1023 of the 1024-byte table at +416.
 const CELLS: u16 = 1024;
 /// 0x140073c80 passes a stack local as the measured ruby-line flag array; the frame holds
@@ -111,10 +104,10 @@ impl AuxiliaryText {
                     if b == 0 {
                         return Err("unterminated auxiliary ruby group");
                     }
-                    if lead(b) {
+                    if self.encoding.is_lead(b) {
                         let code = u16::from_be_bytes([b, byte(i + 1)]);
                         i += 2;
-                        if self.at_edge(x) && !(no_break && NO_BREAK.contains(&code)) {
+                        if self.at_edge(x) && !(no_break && self.encoding.no_break(code)) {
                             wrap(&mut x, &mut y, &mut line)?;
                         }
                         glyphs.push(AuxiliaryGlyph {
@@ -135,7 +128,7 @@ impl AuxiliaryText {
                     if b == 0 {
                         return Err("unterminated auxiliary ruby group");
                     }
-                    if lead(b) {
+                    if self.encoding.is_lead(b) {
                         i += 2;
                     } else {
                         i += 1;
@@ -146,17 +139,17 @@ impl AuxiliaryText {
                 }
                 continue;
             }
-            if !lead(first) {
+            if !self.encoding.is_lead(first) {
                 // 0x14002f7a2 compares with a word the caller never stored (r8's home slot).
                 return Err("half-width auxiliary text advance reads an uninitialized stack word");
             }
             let code = u16::from_be_bytes([first, byte(i + 1)]);
             i += 2;
-            if self.at_edge(x) && !(no_break && NO_BREAK.contains(&code)) {
+            if self.at_edge(x) && !(no_break && self.encoding.no_break(code)) {
                 wrap(&mut x, &mut y, &mut line)?;
             }
             let mut position = [truncate(x), truncate(y)];
-            if code == VOICED_MARK {
+            if self.encoding.voiced_mark(code) {
                 position[0] = (position[0] as u32).wrapping_sub(size / 5) as i32;
                 x += (size_f * 0.5 - size_f / 5.0) + self.float(52);
             } else {
@@ -231,7 +224,7 @@ impl AuxiliaryText {
                     if b == 0 {
                         return Err("unterminated auxiliary ruby group");
                     }
-                    if lead(b) {
+                    if self.encoding.is_lead(b) {
                         columns += 2;
                         i += 2;
                         x += size_f + self.float(52);
@@ -248,7 +241,7 @@ impl AuxiliaryText {
                     if b == 0 {
                         return Err("unterminated auxiliary ruby group");
                     }
-                    if lead(b) {
+                    if self.encoding.is_lead(b) {
                         i += 2;
                     } else {
                         i += 1;
@@ -259,12 +252,12 @@ impl AuxiliaryText {
                 }
                 continue;
             }
-            if lead(first) {
+            if self.encoding.is_lead(first) {
                 let code = u16::from_be_bytes([first, byte(i + 1)]);
                 i += 2;
                 let advance = size_f + self.float(52);
                 if x >= (self.float(16) + self.float(24)) - advance
-                    && !(no_break && NO_BREAK.contains(&code))
+                    && !(no_break && self.encoding.no_break(code))
                 {
                     columns = 0;
                     lines += 1;

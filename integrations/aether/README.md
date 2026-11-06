@@ -1,0 +1,58 @@
+# Aether CMVS provider
+
+This Apple provider implements Aether's `engine_runtime_provider_v1_t` with the
+shared Rust `cmvs-host` player. Aether owns the library, window and presentation;
+CMVS produces CPU RGBA8 frames and owns native audio, script execution and saves.
+The provider probes `data/pack/start.ps2` or `start.ps3` and `script.cpz` by magic,
+then requires a supported startup fingerprint when opening the game.
+
+The parent build adds this directory and links `aether_cmvs_runtime`, then calls
+`aetherkiri::cmvs::RegisterRuntimeProvider()`. Rust stable and the target selected
+by the Apple CMake toolchain must be installed. `AETHERKIRI_CMVS_ABI_INCLUDE`
+points to Aether's `abi/include`; `AETHERKIRI_CMVS_CARGO_TARGET_DIR` optionally
+selects a reusable Cargo cache. The compositor is optimized with debug symbols
+even when the parent application is Debug. Build one architecture at a time.
+
+Before opening a game directory, set `default_font` to an available OpenType
+font and provide a writable user directory. For Chinese patches the font must
+contain Chinese glyphs. Saves, settings and font preferences use a stable
+per-game subdirectory below `<writable>/cmvs/`. Resource files remain read-only.
+`cmvs_native_audio=0` selects the deterministic VM clock for automated replays;
+native audio is enabled by default. Input coordinates are logical frame pixels.
+Pause and pointer cancellation release held input. Unsupported CMVS options
+report `NOT_SUPPORTED`; unrelated options broadcast by Aether are ignored.
+
+The iOS parent must merge both `aether_cmvs_runtime` and `aether_cmvs_rust` into
+its plugin archive and link the frameworks exported by this CMake target,
+including AVFAudio. Both device and simulator Rust targets are selected from
+the toolchain SDK, including Xcode's normalized absolute SDK paths.
+
+## Validation
+
+The complete Aether macOS Debug application was built with its normal runtime
+packages, including Internal. Amatsutsumi 1.03 with the PKP Chinese translation
+was imported through the normal game library and started into translated title
+graphics, intro subtitles and Chinese dialogue. Pointer and Enter input advanced
+the opening story. The standalone provider test also replays this opening and
+validates frame-buffer bounds, lifecycle and input through the public ABI.
+
+The provider builds for arm64 iOS device and simulator. The UIKit player using
+the same Rust host also builds on both targets and runs the translated opening
+in the iOS 18.3 simulator. A complete Aether iOS application and physical iOS
+device execution have not been validated in this change. See the Apple player
+README for save/restart/load coverage and the complete-route coverage limit.
+
+From the parent Aether checkout, a standalone provider contract test can be run
+without distributing game assets:
+
+```sh
+cmake -S packages/cmvs-rs/integrations/aether -B out/cmvs-provider -G Ninja \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DAETHERKIRI_CMVS_ABI_INCLUDE="$PWD/abi/include"
+cmake --build out/cmvs-provider --target cmvs-provider-test
+ctest --test-dir out/cmvs-provider --output-on-failure
+```
+
+The executable optionally accepts `/path/to/game /path/to/font.otf /path/to/frame.ppm`
+to replay the Amatsutsumi opening in an isolated temporary save directory.
+No game assets or generated snapshots belong in this repository.

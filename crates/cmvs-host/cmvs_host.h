@@ -20,6 +20,7 @@ int32_t cmvs_host_tick(CmvsHost *, uint32_t delta_ms);
  * 26 space, 33..36 arrows, 52..63 F1..F12. Pulses survive until a VM frame. */
 int32_t cmvs_host_key(CmvsHost *, uint32_t code, int32_t pressed);
 int32_t cmvs_host_pointer(CmvsHost *, int32_t x, int32_t y);
+int32_t cmvs_host_cancel_input(CmvsHost *);
 int32_t cmvs_host_pause(CmvsHost *, int32_t paused);
 int32_t cmvs_host_save_preferences(CmvsHost *);
 const char *cmvs_host_error(const CmvsHost *);

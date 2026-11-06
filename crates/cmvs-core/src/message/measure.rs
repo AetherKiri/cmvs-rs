@@ -33,11 +33,6 @@ pub(super) struct Layout<'a> {
     pub(super) previous: u16,
 }
 
-/// 0x140008080: Shift-JIS lead bytes, without checking the trail byte.
-pub(super) fn lead(byte: u8) -> bool {
-    (0x81..=0x9f).contains(&byte) || (0xe0..=0xfc).contains(&byte)
-}
-
 impl Layout<'_> {
     pub(super) fn limit(&self) -> u32 {
         (self.text.area[0] as u32)
@@ -100,7 +95,7 @@ impl Layout<'_> {
                 }
                 self.newline(true, true)?;
             }
-        } else if self.x >= self.limit() && !matches!(code, 0x8141 | 0x8142 | 0x8176 | 0x8178) {
+        } else if self.x >= self.limit() && !self.text.encoding.no_break(code) {
             // This branch increments the line number without resetting the byte count.
             self.newline(false, true)?;
         }
@@ -180,7 +175,7 @@ pub(super) fn measure(
                 loop {
                     let byte = *bytes.get(i).ok_or("ruby base is missing its slash")?;
                     i += 1;
-                    if lead(byte) {
+                    if text.encoding.is_lead(byte) {
                         bytes.get(i).ok_or("truncated double-byte ruby character")?;
                         i += 1;
                         state.add(true);
@@ -193,7 +188,7 @@ pub(super) fn measure(
                         .get(i)
                         .ok_or("ruby annotation is missing its closing brace")?;
                     i += 1;
-                    if lead(byte) {
+                    if text.encoding.is_lead(byte) {
                         bytes
                             .get(i)
                             .ok_or("truncated double-byte ruby annotation")?;
@@ -203,7 +198,7 @@ pub(super) fn measure(
                     }
                 }
             }
-            byte if lead(byte) => {
+            byte if text.encoding.is_lead(byte) => {
                 let second = *bytes
                     .get(i + 1)
                     .ok_or("truncated double-byte text character")?;

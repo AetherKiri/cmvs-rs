@@ -80,7 +80,8 @@ impl Player {
         native_audio: bool,
     ) -> Result<Self, Box<dyn Error>> {
         let game = Registry::builtin().identify_game(root, None)?;
-        let font = FontRenderer::read(font_path, 0)?;
+        let font =
+            FontRenderer::read(font_path, 0)?.with_encoding(cmvs_core::patch::text_encoding(root)?);
         font.set_user_directory(user)?;
         let script = load_start(root, &game.files)?;
         let mut audio_control = None;
@@ -142,12 +143,15 @@ impl Player {
             audio.set_active(!paused);
         }
         if paused {
-            self.input.held.fill(false);
-            self.input.pulses.fill(false);
-            self.input.functions = 0;
-            self.session
-                .with_dependent_mut(|_, s| self.input.codes.clear(s.input_mut()));
+            self.cancel_input();
         }
+    }
+    pub fn cancel_input(&mut self) {
+        self.input.held.fill(false);
+        self.input.pulses.fill(false);
+        self.input.functions = 0;
+        self.session
+            .with_dependent_mut(|_, s| self.input.codes.clear(s.input_mut()));
     }
     pub fn size(&self) -> [u32; 2] {
         self.backend.size

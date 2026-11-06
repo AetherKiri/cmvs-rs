@@ -115,6 +115,7 @@ pub struct LineBreakRules {
 /// 0x14005bc90. Unlisted constructor/0x14005d3b0 defaults are documented in vm-semantics.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextObject {
+    pub encoding: crate::text_encoding::TextEncoding,
     /// Requested face (+44), empty selects the configured default.
     pub font_face: Vec<u8>,
     /// Face of the slot's persistent font object (+576 -> +4224): the global face when
@@ -212,6 +213,7 @@ pub trait GlyphMetrics: std::fmt::Debug {
 
 #[derive(Debug, Default)]
 pub struct MessageHost {
+    encoding: crate::text_encoding::TextEncoding,
     child_slots: crate::scene::ChildSlots,
     /// Inspected 2007 text creation uses eight slots and accepts explicit faces.
     legacy_text_creation: bool,
@@ -241,6 +243,16 @@ pub struct MessageHost {
 }
 
 impl MessageHost {
+    pub fn set_encoding(&mut self, encoding: crate::text_encoding::TextEncoding) {
+        self.encoding = encoding;
+        for text in self.texts.iter_mut().flatten() {
+            text.encoding = encoding;
+        }
+        for text in self.auxiliary_texts.iter_mut().flatten() {
+            text.encoding = encoding;
+        }
+    }
+
     /// Construct window-object hosts using the selected runtime child-table layout.
     pub fn for_profile(profile: &crate::profile::EngineProfile) -> Self {
         Self {
@@ -791,6 +803,7 @@ impl MessageHost {
         let face = self.default_face();
         let mut candidate = candidate;
         candidate.face = self.auxiliary_font_faces[slot].get_or_insert(face).clone();
+        candidate.encoding = self.encoding;
         candidate.revision_alpha = self.output_settings.revision_alpha;
         // The native overwrite leaks its old object; Rust drops owned state.
         self.auxiliary_texts[slot] = Some(candidate);
@@ -1090,6 +1103,7 @@ impl MessageHost {
             self.font_faces[index] = Some(face.clone());
         }
         self.texts[index] = Some(TextObject {
+            encoding: self.encoding,
             font_face: requested_face,
             face,
             bold: self.font_bold[index],
@@ -1387,7 +1401,7 @@ impl MessageHost {
                 "text count needs an existing text object in slots 0..11",
             ));
         }
-        let count = output::encoded_length(&bytes).map_err(fail)?;
+        let count = output::encoded_length(&bytes, self.encoding).map_err(fail)?;
         call.complete(0x4008)?;
         call.vm
             .state_mut()
@@ -2126,6 +2140,7 @@ impl MessageHost {
         self.font_bold[text] = self.output_settings.bold;
         // 0x14005d3b0's setter calls override the constructor values (e.g. +144 30 -> 100).
         self.texts[text] = Some(TextObject {
+            encoding: self.encoding,
             font_face: Vec::new(),
             face,
             bold: self.font_bold[text],
@@ -2263,6 +2278,7 @@ impl MessageHost {
             }
         }
         self.texts = texts;
+        self.set_encoding(self.encoding);
         self.windows = windows;
         self.auxiliary_texts = Default::default();
     }

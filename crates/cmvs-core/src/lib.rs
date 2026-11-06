@@ -1,4 +1,4 @@
-//! Platform-independent CMVS formats, VM, scene and backend contracts. No dependencies.
+//! Platform-independent CMVS formats, VM, scene and backend contracts.
 pub mod audio;
 pub mod bootstrap;
 pub mod buttons;
@@ -28,6 +28,7 @@ pub mod message;
 pub mod message_flags;
 pub mod mgv;
 pub mod movie;
+pub mod patch;
 pub mod pb3;
 pub mod platform;
 pub mod profile;
@@ -46,6 +47,7 @@ pub mod settings;
 pub mod snapshot;
 pub mod system_save;
 pub mod text;
+pub mod text_encoding;
 pub mod timers;
 pub mod viewport;
 pub mod vm;

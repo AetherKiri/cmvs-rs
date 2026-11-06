@@ -130,6 +130,7 @@ pub(crate) fn decode_with_layout(
     }
     .into();
     Ok(TextObject {
+        encoding: Default::default(),
         font_face,
         face,
         bold: aw(108) != 0,

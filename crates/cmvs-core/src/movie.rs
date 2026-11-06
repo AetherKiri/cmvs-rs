@@ -83,6 +83,7 @@ impl DirectoryMovies<'_> {
             .ok_or("movie directory 0x2015 was not registered")?;
         let mut relative = directory.to_vec();
         relative.extend_from_slice(name);
+        let relative = crate::patch::movie_name(self.root, &relative)?;
         let path = match resolve_under(self.root, &relative) {
             Ok(path) => path,
             Err(e)

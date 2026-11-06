@@ -11,6 +11,7 @@
     CFTimeInterval _lastTime;
     uint64_t _serial;
     BOOL _failed;
+    NSArray<NSDictionary *> *_smokeActions;
 }
 @end
 
@@ -31,6 +32,11 @@
     [notifications addObserver:self selector:@selector(pause) name:UIApplicationWillResignActiveNotification object:nil];
     [notifications addObserver:self selector:@selector(resume) name:UIApplicationDidBecomeActiveNotification object:nil];
     NSString *path = NSProcessInfo.processInfo.environment[@"CMVS_GAME_DIR"];
+    NSString *actions = NSProcessInfo.processInfo.environment[@"CMVS_SMOKE_ACTIONS"];
+    if (actions.length) {
+        id parsed = [NSJSONSerialization JSONObjectWithData:[actions dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        if ([parsed isKindOfClass:NSArray.class]) _smokeActions = parsed;
+    }
     if (path.length) dispatch_async(dispatch_get_main_queue(), ^{ [self openGame:[NSURL fileURLWithPath:path]]; });
 }
 - (void)showError:(NSString *)message {
@@ -103,6 +109,11 @@
     _serial=cmvs_host_frame_serial(_player);
     // Optional simulator diagnostics. The same tick, input and presentation path is used.
     NSDictionary *env=NSProcessInfo.processInfo.environment;
+    for (NSDictionary *action in _smokeActions) {
+        if (![action isKindOfClass:NSDictionary.class] || [action[@"frame"] unsignedLongLongValue]!=_serial) continue;
+        if (action[@"x"] && action[@"y"]) cmvs_host_pointer(_player,[action[@"x"] intValue],[action[@"y"] intValue]);
+        if (action[@"code"]) cmvs_host_key(_player,[action[@"code"] unsignedIntValue],[action[@"pressed"] boolValue]);
+    }
     NSUInteger limit=[env[@"CMVS_SMOKE_FRAMES"] integerValue];
     if (limit && _serial==limit) {
         NSString *output=env[@"CMVS_SMOKE_OUTPUT"];
@@ -124,7 +135,7 @@
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self pointer:touches.anyObject pressed:YES]; }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self pointer:touches.anyObject pressed:YES]; }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self pointer:touches.anyObject pressed:NO]; }
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { if (_player) cmvs_host_key(_player,1,0); }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { if (_player) cmvs_host_cancel_input(_player); }
 - (void)dealloc { [self closeGame]; [NSNotificationCenter.defaultCenter removeObserver:self]; }
 @end
 

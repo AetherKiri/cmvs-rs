@@ -1,11 +1,7 @@
 //! Explicit recording of 0x2152 output for plain characters, ruby groups and newlines,
 //! including automatic wrapping. These records are not glyph textures and must not imply successful
 //! font rendering.
-use super::{
-    MessageHost, TextObject,
-    measure::{lead, line_break_kind},
-    window_slot,
-};
+use super::{MessageHost, TextObject, measure::line_break_kind, window_slot};
 use crate::{
     bytecode::DecodeError,
     evaluate::error,
@@ -135,17 +131,22 @@ pub(super) struct Group {
 
 /// Parses the group whose `{` precedes `start`. The original reads past a terminator
 /// instead of stopping, so a missing `/` or `}` is an error.
-pub(super) fn parse_group(bytes: &[u8], start: usize) -> Result<Group, &'static str> {
+pub(super) fn parse_group(
+    bytes: &[u8],
+    start: usize,
+    encoding: crate::text_encoding::TextEncoding,
+) -> Result<Group, &'static str> {
     fn part(
         bytes: &[u8],
         i: &mut usize,
         close: u8,
         missing: &'static str,
+        encoding: crate::text_encoding::TextEncoding,
     ) -> Result<Vec<Option<u16>>, &'static str> {
         let mut items = Vec::new();
         loop {
             let byte = *bytes.get(*i).filter(|&&b| b != 0).ok_or(missing)?;
-            if lead(byte) {
+            if encoding.is_lead(byte) {
                 let second = *bytes
                     .get(*i + 1)
                     .filter(|&&b| b != 0)
@@ -162,19 +163,29 @@ pub(super) fn parse_group(bytes: &[u8], start: usize) -> Result<Group, &'static 
         }
     }
     let mut i = start;
-    let base = part(bytes, &mut i, b'/', "ruby base is missing its slash")?;
+    let base = part(
+        bytes,
+        &mut i,
+        b'/',
+        "ruby base is missing its slash",
+        encoding,
+    )?;
     let ruby = part(
         bytes,
         &mut i,
         b'}',
         "ruby annotation is missing its closing brace",
+        encoding,
     )?;
     Ok(Group { base, ruby, end: i })
 }
 
 /// 0x2119 counts encoded bytes, skipping escapes and ruby annotations. Within a
 /// ruby base the original counts double-byte pairs only, even when ASCII is present.
-pub(super) fn encoded_length(bytes: &[u8]) -> Result<u32, &'static str> {
+pub(super) fn encoded_length(
+    bytes: &[u8],
+    encoding: crate::text_encoding::TextEncoding,
+) -> Result<u32, &'static str> {
     let (mut i, mut count) = (0, 0u32);
     while i < bytes.len() && bytes[i] != 0 {
         match bytes[i] {
@@ -186,12 +197,12 @@ pub(super) fn encoded_length(bytes: &[u8]) -> Result<u32, &'static str> {
                 }
             }
             b'{' => {
-                let group = parse_group(bytes, i + 1)?;
+                let group = parse_group(bytes, i + 1, encoding)?;
                 count = count
                     .wrapping_add(2 * group.base.iter().filter(|v| v.is_some()).count() as u32);
                 i = group.end;
             }
-            byte if lead(byte) => {
+            byte if encoding.is_lead(byte) => {
                 bytes
                     .get(i + 1)
                     .filter(|&&b| b != 0)
@@ -250,7 +261,7 @@ pub(super) fn ruby_layout(
             *lines
                 .get_mut(line)
                 .ok_or("ruby group beyond the 32 ruby-line flags")? = 1;
-            let group = parse_group(bytes, i + 1)?;
+            let group = parse_group(bytes, i + 1, text.encoding)?;
             for _ in group.base.iter().flatten() {
                 x = x.wrapping_add(size).wrapping_add(spacing);
                 count = count.wrapping_add(2);
@@ -258,14 +269,14 @@ pub(super) fn ruby_layout(
             }
             i = group.end;
             continue;
-        } else if lead(byte) {
+        } else if text.encoding.is_lead(byte) {
             let second = *bytes
                 .get(i + 1)
                 .filter(|&&b| b != 0)
                 .ok_or("truncated double-byte message character")?;
             i += 2;
             let code = u16::from_be_bytes([byte, second]);
-            (size, !matches!(code, 0x8141 | 0x8142 | 0x8176 | 0x8178))
+            (size, !text.encoding.no_break(code))
         } else {
             i += 1;
             (size >> 1, true)
@@ -275,7 +286,7 @@ pub(super) fn ruby_layout(
             count = 0;
         }
         x = x.wrapping_add(advance).wrapping_add(spacing);
-        count = count.wrapping_add(if lead(byte) { 2 } else { 1 });
+        count = count.wrapping_add(if text.encoding.is_lead(byte) { 2 } else { 1 });
         max = max.max(count);
     }
     Ok((lines, [line as u32 + 1, max, count]))
@@ -292,7 +303,7 @@ pub(super) fn wraps(
     limit: u32,
 ) -> Result<bool, &'static str> {
     Ok(match &text.line_break {
-        None => x >= limit && !matches!(code, 0x8141 | 0x8142 | 0x8176 | 0x8178),
+        None => x >= limit && !text.encoding.no_break(code),
         Some(_) if x < limit => {
             text.layout_scratch[1] = u32::from(code);
             false
@@ -471,7 +482,7 @@ fn append(
             continue;
         }
         if byte == b'{' {
-            let group = parse_group(bytes, i + 1)?;
+            let group = parse_group(bytes, i + 1, text.encoding)?;
             i = group.end;
             if wraps(text, 0, x, limit)? {
                 new_line(text, &mut line, &mut x, &mut y)?;
@@ -525,7 +536,7 @@ fn append(
             }
             continue;
         }
-        let wide = lead(byte);
+        let wide = text.encoding.is_lead(byte);
         let (code, wrap) = if wide {
             let second = *bytes
                 .get(i + 1)
@@ -549,14 +560,14 @@ fn append(
                 text.layout_scratch = [0; 2];
             }
         }
-        let gx = if code == 0x814a {
+        let gx = if text.encoding.voiced_mark(code) {
             x.wrapping_sub(size / 5)
         } else {
             x
         };
         last = Some(push(text, code, [gx, y], size, settings.outline)?);
         delay = retime(text, last, delay, interval, instant, settings)?;
-        let advance = if code == 0x814a {
+        let advance = if text.encoding.voiced_mark(code) {
             (size >> 1).wrapping_sub(size / 5)
         } else if wide {
             size
@@ -613,7 +624,7 @@ fn place(
             if text.line_break.is_some() {
                 return Err("direct ruby groups under line-break rules are not modeled");
             }
-            let group = parse_group(bytes, i + 1)?;
+            let group = parse_group(bytes, i + 1, text.encoding)?;
             for &code in group.base.iter().flatten() {
                 if wraps(text, code, x, limit)? {
                     new_line(text, &mut line, &mut x, &mut y)?;
@@ -624,7 +635,7 @@ fn place(
             i = group.end;
             continue;
         }
-        if !lead(byte) {
+        if !text.encoding.is_lead(byte) {
             let metrics =
                 metrics.ok_or("direct single-byte text requires a font metrics backend")?;
             let code = (byte as i8 as i16) as u16;
@@ -654,7 +665,7 @@ fn place(
                 text.layout_scratch = [0; 2];
             }
         }
-        let (gx, advance) = if code == 0x814a {
+        let (gx, advance) = if text.encoding.voiced_mark(code) {
             (x.wrapping_sub(size / 5), (size >> 1).wrapping_sub(size / 5))
         } else {
             (x, size)
@@ -878,5 +889,26 @@ impl MessageHost {
             input.consume(20);
         }
         Ok(Some(step))
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    use crate::text_encoding::TextEncoding;
+    #[test]
+    fn gbk_trails_do_not_become_escapes_or_ruby_delimiters() {
+        let gbk = TextEncoding::Gbk;
+        let bytes = b"{\xb0\x5c/\xb0\x7d}";
+        let group = parse_group(bytes, 1, gbk).unwrap();
+        assert_eq!(group.base[0], Some(0xb05c));
+        assert_eq!(group.ruby[0], Some(0xb07d));
+        assert_eq!(group.end, bytes.len());
+        assert_eq!(encoded_length(bytes, gbk).unwrap(), 2);
+        assert_eq!(encoded_length(b"\xb0\x5c", gbk).unwrap(), 2);
+        assert!(encoded_length(b"\xb0", gbk).is_err());
+        assert!(!TextEncoding::ShiftJis.is_lead(0xb0));
+        assert!(gbk.no_break(0xa1a3));
+        assert!(!gbk.voiced_mark(0x814a));
     }
 }

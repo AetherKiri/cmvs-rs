@@ -188,15 +188,28 @@ pub trait ScriptSource {
 pub struct ArchiveScripts<R> {
     reader: R,
     index: ArchiveIndex,
+    patch: Option<crate::patch::Archive>,
 }
 impl<R: Read + Seek> ArchiveScripts<R> {
+    pub fn with_patch(mut self, root: &std::path::Path) -> Result<Self, LoadError> {
+        self.patch = crate::patch::Archive::open_optional(root, b"Pk/Scripts.pk")?;
+        Ok(self)
+    }
     pub fn from_start(mut reader: R, script: &Script, basename: &[u8]) -> Result<Self, LoadError> {
         let index = archive_index_from_start(&mut reader, script, basename)?;
-        Ok(Self { reader, index })
+        Ok(Self {
+            reader,
+            index,
+            patch: None,
+        })
     }
     pub fn new(mut reader: R) -> Result<Self, LoadError> {
         let index = ArchiveIndex::read(&mut reader)?;
-        Ok(Self { reader, index })
+        Ok(Self {
+            reader,
+            index,
+            patch: None,
+        })
     }
 
     pub fn with_cpz7_parameters(
@@ -204,11 +217,20 @@ impl<R: Read + Seek> ArchiveScripts<R> {
         parameters: Cpz7Parameters,
     ) -> Result<Self, LoadError> {
         let index = ArchiveIndex::read_with_cpz7_parameters(&mut reader, parameters)?;
-        Ok(Self { reader, index })
+        Ok(Self {
+            reader,
+            index,
+            patch: None,
+        })
     }
 }
 impl<R: Read + Seek> ScriptSource for ArchiveScripts<R> {
     fn load(&mut self, name: &[u8]) -> Result<Script, LoadError> {
+        if let Some(patch) = &mut self.patch
+            && let Some(bytes) = patch.read(name)?
+        {
+            return Ok(Script::decode_patch(&bytes)?);
+        }
         let entry = self.index.find(name)?;
         Ok(Script::decode(
             &self.index.read_entry(&mut self.reader, entry)?,

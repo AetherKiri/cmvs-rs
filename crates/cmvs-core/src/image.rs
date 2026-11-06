@@ -110,7 +110,8 @@ pub fn decode(bytes: &[u8]) -> Result<Option<DecodedImage>, FormatError> {
                 _ => Ok(None),
             }
         }
-        [0x89, b'P', b'N', b'G'] | b"MSK0" | b"PB2A" | [b'B', b'M', ..] => Err(unsupported),
+        [0x89, b'P', b'N', b'G'] => decode_png(bytes).map(Some),
+        b"MSK0" | b"PB2A" | [b'B', b'M', ..] => Err(unsupported),
         _ => Ok(None),
     }
 }
@@ -179,4 +180,67 @@ fn load_inner(
     source.finish_image(read);
     chain.pop();
     result.map_err(|e: Box<dyn Error>| format!("image {}: {e}", name.escape_ascii()).into())
+}
+
+fn decode_png(bytes: &[u8]) -> Result<DecodedImage, FormatError> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_limits(png::Limits {
+        bytes: crate::MAX_PAYLOAD,
+    });
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|_| FormatError("invalid PNG header"))?;
+    let info = reader.info();
+    let (width, height) = (info.width, info.height);
+    let count = u64::from(width) * u64::from(height);
+    if count == 0 || count > (crate::MAX_PAYLOAD / 4) as u64 {
+        return Err(FormatError("PNG image exceeds allocation limit"));
+    }
+    let length = reader
+        .output_buffer_size()
+        .filter(|&n| n <= crate::MAX_PAYLOAD)
+        .ok_or(FormatError("PNG buffer exceeds allocation limit"))?;
+    let mut buffer = vec![0; length];
+    let frame = reader
+        .next_frame(&mut buffer)
+        .map_err(|_| FormatError("invalid PNG pixels"))?;
+    let mut pixels = Vec::with_capacity(count as usize * 4);
+    let channels = frame.color_type.samples();
+    for p in buffer[..frame.buffer_size()].chunks_exact(channels) {
+        let rgba = match frame.color_type {
+            png::ColorType::Rgba => [p[0], p[1], p[2], p[3]],
+            png::ColorType::Rgb => [p[0], p[1], p[2], 255],
+            png::ColorType::GrayscaleAlpha => [p[0], p[0], p[0], p[1]],
+            png::ColorType::Grayscale => [p[0], p[0], p[0], 255],
+            _ => return Err(FormatError("PNG palette was not expanded")),
+        };
+        pixels.extend(rgba);
+    }
+    Ok(DecodedImage {
+        pixels: RgbaImage::new(width, height, pixels)?,
+        alpha: true,
+    })
+}
+
+#[cfg(test)]
+mod png_tests {
+    use super::*;
+    #[test]
+    fn png_replacement_preserves_rgba_and_rejects_truncation() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[3, 5, 7, 123])
+                .unwrap();
+        }
+        let image = decode(&bytes).unwrap().unwrap();
+        assert_eq!(image.pixels.pixels(), [3, 5, 7, 123]);
+        assert!(decode(&bytes[..20]).is_err());
+    }
 }

@@ -57,11 +57,7 @@ fn substring(call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
         let Some(&byte) = bytes.get(index) else {
             break;
         };
-        let width = if (0x81..=0x9f).contains(&byte) || (0xe0..=0xfc).contains(&byte) {
-            2
-        } else {
-            1
-        };
+        let width = if call.vm.encoding.is_lead(byte) { 2 } else { 1 };
         let next = index + width;
         if next > bytes.len() {
             return Err(error(
@@ -108,7 +104,8 @@ fn compare(call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
     );
     let first = call.vm.resolve_string(first)?;
     let second = call.vm.resolve_string(second)?;
-    let equal = equal_ignoring_ascii_case(&first, &second).map_err(|why| error(pc, 0x20f1, why))?;
+    let equal = equal_ignoring_ascii_case(&first, &second, call.vm.encoding)
+        .map_err(|why| error(pc, 0x20f1, why))?;
     call.complete(0x4008)?;
     call.vm
         .state_mut()
@@ -121,12 +118,16 @@ fn compare(call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
 /// byte exactly, any other byte compares with a-z folded to A-Z; the second string must
 /// end where the first does. A trailing lead byte whose pair matches steps past the first
 /// string's terminator, which is not modeled.
-fn equal_ignoring_ascii_case(first: &[u8], second: &[u8]) -> Result<bool, &'static str> {
+fn equal_ignoring_ascii_case(
+    first: &[u8],
+    second: &[u8],
+    encoding: crate::text_encoding::TextEncoding,
+) -> Result<bool, &'static str> {
     let at = |text: &[u8], i: usize| text.get(i).copied().unwrap_or(0);
     let mut i = 0;
     while at(first, i) != 0 {
         let b = at(first, i);
-        if (0x81..=0x9f).contains(&b) || (0xe0..=0xfc).contains(&b) {
+        if encoding.is_lead(b) {
             if b != at(second, i) || at(first, i + 1) != at(second, i + 1) {
                 return Ok(false);
             }

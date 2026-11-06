@@ -33,6 +33,26 @@ read-only game directory when running `xcrun simctl launch`. Optional
 `SIMCTL_CHILD_CMVS_SMOKE_FRAMES` and `SIMCTL_CHILD_CMVS_SMOKE_OUTPUT` capture a
 completed frame and close the player after the requested number of VM frames.
 These use the same player and presentation path as the document picker.
+`SIMCTL_CHILD_CMVS_SMOKE_ACTIONS` accepts a JSON array of input events, each with
+`frame`, optional logical `x`/`y`, and optional CMVS `code`/`pressed` fields.
+For example, `[{"frame":600,"code":22,"pressed":true},{"frame":601,"code":22,"pressed":false}]`
+presses and releases Enter after 600 completed frames.
+
+## PKP translation overlays
+
+The GBK PKP patch family used by Amatsutsumi 1.03 is supported directly:
+`Pk/Scripts.pk` overlays scripts, `Pk/Graphic.pk` and `Pk/Mosic.pk` overlay
+images, and loose `Pk/*.cmv` files replace movies. Script entries contain
+unencrypted LZSS PS2A payloads inside raw-DEFLATE PKP entries. Image replacements
+may be PNG or PB3. Movie frame and audio offsets are resolved from the same
+replacement container. Indexes, paths and decompressed allocations are bounded.
+
+`Pk/Scripts.pk` enables per-player GBK parsing and glyph decoding, including
+the patch's musical-note glyph. Script offsets and save bytes are preserved.
+Installations without that overlay retain Shift-JIS behavior. Supply a font
+with Chinese glyphs for the translated version. No patch DLL is executed,
+and no game, translation, or embedded DLL font is distributed by this project.
+Other DLL hooks and loose script/image override formats are not implemented.
 
 The host C API is in `crates/cmvs-host/cmvs_host.h`. Calls on a handle are
 serialized by its owner. The host must respect cooperative budget slices:
@@ -44,19 +64,21 @@ the optional desktop MGV/Theora factory is not installed by this host.
 
 ## Validation, 2026-11-06
 
-Apple Silicon macOS release compilation, a native Amatsutsumi 1.03 title run
-with a 48 kHz stereo output device, and iOS arm64 device/simulator linking were
-tested. The iOS 18.3 simulator ran the same installation for 600 completed
-frames and exported a non-black 1280x720 title frame. Device execution has not
-been tested. 1,050 core/CLI/host tests pass (14 external-data tests skipped).
-The host also passes Clippy with `--no-deps -D warnings`. Whole-dependency strict
+Apple Silicon macOS release compilation and iOS arm64 device/simulator linking
+were tested. Both the original Japanese title and the PKP Chinese translation
+ran with native audio. The iOS 18.3 simulator advanced the translated version
+for 2,850 completed frames, through the replacement intro movie into Chinese
+dialogue, and exported a 1280x720 frame. Device execution has not been tested.
+Core/CLI/font/host tests pass, including PKP bounds and decompression, PNG,
+GBK punctuation and multibyte parsing, glyph decoding, and quick input pulses.
+The desktop, font, host and probe crates pass Clippy with `--no-deps -D warnings`. Whole-dependency strict
 Clippy encounters the pre-existing `manual_range_contains` warning in
 `cmvs-core/src/camera/view.rs` with Rust 1.96.
 
-The real-installation probe passes R1, I4 and V1-V4: fresh startup, backlog
+Both original and translated real-installation probes pass R1, I4 and V1-V4: fresh startup, backlog
 round-trip, save/restart/load continuation through 20 message waits, snapshot
 round-trip and backup-slot behavior. These are headless input replays, not
-physical iOS touch verification. V5, which plays a complete route before
+physical iOS touch verification. The original-resource V5, which plays a complete route before
 checking system-save persistence, exhausted both a 10-million-step budget and
 the default 50-million-step budget; complete-route coverage is not claimed.
 
@@ -64,5 +86,5 @@ The exact 1.03 startup hash is registered as `amatsutsumi-103`; its script
 archive and original x86/x64 executables match the existing Amatsutsumi record.
 Sharing an archive is allowed only when profile, game ID, executable evidence
 and resume policy agree; unknown startup hashes still fail identification.
-The tested resources use Japanese text. Third-party DLL/PK translation overlays
-are not loaded by this implementation.
+The Aether provider and its integration validation are described in
+[`integrations/aether/README.md`](../../integrations/aether/README.md).

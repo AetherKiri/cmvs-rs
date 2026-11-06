@@ -139,6 +139,20 @@ impl Script {
         Ok(())
     }
 
+    /// PKP translation scripts carry the same header but unencrypted LZSS bytes.
+    pub fn decode_patch(raw: &[u8]) -> Result<Self, FormatError> {
+        let header = Header::parse(raw)?;
+        if header.compressed_size as usize != raw.len() - HEADER_SIZE {
+            return Err(FormatError(
+                "patch script packed length differs from header",
+            ));
+        }
+        let payload = lzss::decode(&raw[HEADER_SIZE..], header.decoded_size as usize)?;
+        let mut image = raw[..HEADER_SIZE].to_vec();
+        image.extend(payload);
+        Self::from_memory_image(&image)
+    }
+
     pub fn decode(raw: &[u8]) -> Result<Self, FormatError> {
         let header = Header::parse(raw)?;
         let total = header.segment_size();
@@ -239,5 +253,37 @@ impl Script {
             offset += bytes.len();
         }
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+    #[test]
+    fn patch_lzss_keeps_script_offsets_and_rejects_size_mismatches() {
+        let payload = [0, 0, 0xc4, 0xe3, 0];
+        let packed = lzss::encode(&payload);
+        let mut raw = b"PS2A".to_vec();
+        for word in [
+            48u32,
+            0,
+            0x1a003873,
+            0,
+            2,
+            0,
+            3,
+            0,
+            packed.len() as u32,
+            5,
+            0,
+        ] {
+            raw.extend(word.to_le_bytes());
+        }
+        raw.extend(packed);
+        let script = Script::decode_patch(&raw).unwrap();
+        assert_eq!(script.text(), &[0xc4, 0xe3, 0]);
+        assert_eq!(script.code(), &[0, 0]);
+        raw[40..44].copy_from_slice(&4u32.to_le_bytes());
+        assert!(Script::decode_patch(&raw).is_err());
     }
 }

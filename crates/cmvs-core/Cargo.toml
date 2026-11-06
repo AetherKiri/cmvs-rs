@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Platform-independent CMVS formats, VM, scene and backend contracts"
 
+[dependencies]
+miniz_oxide = "=0.8.9"
+png = "=0.18.1"
+
 [lints]
 workspace = true
 

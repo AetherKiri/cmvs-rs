@@ -5,7 +5,7 @@ use super::{
     MessageHost, TextObject,
     auxiliary::{AuxiliaryGlyph, AuxiliaryText},
     auxiliary_layout::TextLayout,
-    measure::{Layout, lead},
+    measure::Layout,
     output::{escape_w, line_end, new_line, parse_group, push, retime, ruby_layout, wraps},
 };
 use crate::bytecode::DecodeError;
@@ -14,8 +14,6 @@ pub(super) struct State {
     proportional: bool,
 }
 
-const NO_BREAK: [u16; 4] = [0x8141, 0x8142, 0x8176, 0x8178];
-const VOICED_MARK: u16 = 0x814a;
 const ESCAPES: &str = "text escape that does not advance in the original";
 fn append(
     text: &mut TextObject,
@@ -90,7 +88,7 @@ fn append(
             continue;
         }
         if byte == b'{' {
-            let group = parse_group(bytes, i + 1)?;
+            let group = parse_group(bytes, i + 1, text.encoding)?;
             if proportional && group.base.iter().flatten().count() > 32 {
                 return Err("ruby base exceeds the original's 32 glyph positions");
             }
@@ -189,7 +187,7 @@ fn append(
             }
             continue;
         }
-        let wide = lead(byte);
+        let wide = text.encoding.is_lead(byte);
         let (code, wrap) = if wide {
             let second = *bytes
                 .get(i + 1)
@@ -213,14 +211,14 @@ fn append(
                 text.layout_scratch = [0; 2];
             }
         }
-        let gx = if code == 0x814a {
+        let gx = if text.encoding.voiced_mark(code) {
             x.wrapping_sub(size / 5)
         } else {
             x
         };
         last = Some(push(text, code, [gx, y], size, settings.outline)?);
         delay = retime(text, last, delay, interval, instant, settings)?;
-        let advance = if code == 0x814a {
+        let advance = if text.encoding.voiced_mark(code) {
             (size >> 1).wrapping_sub(size / 5)
         } else if proportional {
             output_width(text, code, size, true, metrics)?
@@ -284,7 +282,7 @@ fn place(
             if text.line_break.is_some() {
                 return Err("direct ruby groups under line-break rules are not modeled");
             }
-            let group = parse_group(bytes, i + 1)?;
+            let group = parse_group(bytes, i + 1, text.encoding)?;
             if proportional && x >= limit {
                 new_line(text, &mut line, &mut x, &mut y)?;
             }
@@ -299,7 +297,7 @@ fn place(
             i = group.end;
             continue;
         }
-        if !lead(byte) {
+        if !text.encoding.is_lead(byte) {
             let metrics =
                 metrics.ok_or("direct single-byte text requires a font metrics backend")?;
             let code = (byte as i8 as i16) as u16;
@@ -333,7 +331,7 @@ fn place(
                 text.layout_scratch = [0; 2];
             }
         }
-        let (gx, advance) = if code == 0x814a {
+        let (gx, advance) = if text.encoding.voiced_mark(code) {
             (x.wrapping_sub(size / 5), (size >> 1).wrapping_sub(size / 5))
         } else {
             (x, output_width(text, code, size, proportional, metrics)?)
@@ -416,7 +414,7 @@ pub(super) fn measure_pixels(
                         .filter(|&&b| b != 0)
                         .ok_or("unterminated measured ruby group")?;
                     i += 1;
-                    if lead(first) {
+                    if text.encoding.is_lead(first) {
                         let second = *bytes
                             .get(i)
                             .filter(|&&b| b != 0)
@@ -430,7 +428,7 @@ pub(super) fn measure_pixels(
                     }
                 }
             }
-        } else if lead(byte) {
+        } else if text.encoding.is_lead(byte) {
             let second = *bytes
                 .get(i + 1)
                 .filter(|&&b| b != 0)
@@ -473,9 +471,8 @@ impl AuxiliaryText {
     ) -> Result<bool, &'static str> {
         let no_break = self.word(128).expect("modeled field") != 0;
         let Some(rules) = &self.line_break else {
-            return Ok(
-                self.at_edge_font_cells(x) && (simple || !(no_break && NO_BREAK.contains(&code)))
-            );
+            return Ok(self.at_edge_font_cells(x)
+                && (simple || !(no_break && self.encoding.no_break(code))));
         };
         if !self.at_edge_font_cells(x) {
             scratch[1] = u32::from(code);
@@ -614,7 +611,7 @@ impl AuxiliaryText {
                     if b == 0 {
                         return Err("unterminated auxiliary ruby group");
                     }
-                    if lead(b) {
+                    if self.encoding.is_lead(b) {
                         let code = u16::from_be_bytes([b, byte(i + 1)]);
                         i += 2;
                         if !proportional && self.wraps_font_cells(x, code, false, &mut scratch)? {
@@ -638,7 +635,7 @@ impl AuxiliaryText {
                     if b == 0 {
                         return Err("unterminated auxiliary ruby group");
                     }
-                    if lead(b) {
+                    if self.encoding.is_lead(b) {
                         i += 2;
                     } else {
                         i += 1;
@@ -649,7 +646,7 @@ impl AuxiliaryText {
                 }
                 continue;
             }
-            if !lead(first) {
+            if !self.encoding.is_lead(first) {
                 if self.wraps_font_cells(x, first as i8 as i16 as u16, true, &mut scratch)? {
                     wrap(&mut x, &mut y, &mut line, &mut scratch)?;
                 }
@@ -669,7 +666,7 @@ impl AuxiliaryText {
                 wrap(&mut x, &mut y, &mut line, &mut scratch)?;
             }
             let mut position = [truncate(x), truncate(y)];
-            if code == VOICED_MARK {
+            if self.encoding.voiced_mark(code) {
                 position[0] = (position[0] as u32).wrapping_sub(size / 5) as i32;
                 x += (size_f * 0.5 - size_f / 5.0) + self.float_font_cells(52);
             } else {

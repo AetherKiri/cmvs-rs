@@ -167,6 +167,17 @@ pub unsafe extern "C" fn cmvs_host_pixels(handle: *const Handle) -> *const u8 {
         .map_or(std::ptr::null(), |f| f.pixels().as_ptr())
 }
 
+/// Cancel queued touch/key edges when the host abandons a gesture or loses focus.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cmvs_host_cancel_input(handle: *mut Handle) -> i32 {
+    unsafe { handle.as_mut() }.map_or(-1, |h| {
+        h.run(|p| {
+            p.cancel_input();
+            Ok(0)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 //! Aoitori 0x23b9/0x23bb: byte/pixel counts, with a temporary pen and committed scratch.
 //! Executable-bound evidence: docs/games/aoitori/vm-semantics.md.
-use super::{GlyphMetrics, auxiliary::AuxiliaryText, measure::lead, output::parse_group};
+use super::{GlyphMetrics, auxiliary::AuxiliaryText, output::parse_group};
 
 struct Cursor<'a> {
     group: &'a AuxiliaryText,
@@ -126,14 +126,14 @@ impl AuxiliaryText {
                     _ => return Err("unknown or truncated auxiliary measurement escape"),
                 }
             } else if first == b'{' {
-                let group = parse_group(bytes, i + 1)?;
+                let group = parse_group(bytes, i + 1, self.encoding)?;
                 state.wrap(0, true)?;
                 for code in group.base.into_iter().flatten() {
                     add(&mut state, code, true)?;
                 }
                 i = group.end;
             } else {
-                let wide = lead(first);
+                let wide = self.encoding.is_lead(first);
                 let code = if wide {
                     let second = *bytes
                         .get(i + 1)

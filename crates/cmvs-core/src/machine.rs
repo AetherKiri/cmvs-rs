@@ -112,6 +112,7 @@ pub enum Step {
 }
 
 pub struct Machine<'a> {
+    pub(crate) encoding: crate::text_encoding::TextEncoding,
     images: BTreeMap<u8, Image<'a>>,
     slot: u8,
     pc: usize,
@@ -131,6 +132,7 @@ impl<'a> Machine<'a> {
     pub fn at(script: &'a Script, entry: u32) -> Result<Self, DecodeError> {
         let image = Image::prepare(Cow::Borrowed(script), b"entry.ps3".to_vec(), entry)?;
         Ok(Self {
+            encoding: Default::default(),
             images: BTreeMap::from([(0, image)]),
             slot: 0,
             pc: entry as usize,

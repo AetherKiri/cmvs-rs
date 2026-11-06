@@ -110,6 +110,7 @@ struct App<'a> {
     startup: Startup<'a>,
     assets: DirectoryAssets,
     encoding: TextEncoding,
+    pkp_title: bool,
     input: DesktopInput,
     game_input: GameInput,
     bindings: KeyBindings,
@@ -302,6 +303,7 @@ impl App<'_> {
             window: self.window.as_ref().ok_or("no window")?,
             event_loop: el,
             encoding: self.encoding,
+            pkp_title: self.pkp_title,
             aspect_mode: &self.aspect_mode,
             aspect_scaling: &self.aspect_scaling,
             render_mode: &self.render_mode,
@@ -395,6 +397,7 @@ impl ApplicationHandler for App<'_> {
                 window: &window,
                 event_loop: el,
                 encoding: self.encoding,
+                pkp_title: self.pkp_title,
                 aspect_mode: &self.aspect_mode,
                 aspect_scaling: &self.aspect_scaling,
                 render_mode: &self.render_mode,
@@ -604,6 +607,7 @@ impl ApplicationHandler for App<'_> {
                     window: &window,
                     event_loop: el,
                     encoding: self.encoding,
+                    pkp_title: self.pkp_title,
                     aspect_mode: &self.aspect_mode,
                     aspect_scaling: &self.aspect_scaling,
                     render_mode: &self.render_mode,
@@ -908,10 +912,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if font_path.is_some()
         && (record_text
-            || matches!(choice, EncodingChoice::Explicit(encoding) if encoding != TextEncoding::ShiftJis))
+            || matches!(choice, EncodingChoice::Explicit(encoding) if encoding == TextEncoding::Utf8))
     {
         return Err(
-            "--font requires shift-jis encoding and cannot be combined with --record-text".into(),
+            "--font requires Shift-JIS or a GBK PKP overlay and cannot be combined with --record-text".into(),
         );
     }
     if system_save_output.is_some() && user_data_dir.is_some() {
@@ -926,8 +930,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("{line}");
     }
     let script = load_start(root.as_ref(), &game.files)?;
-    let encoding = choice.resolve(script.text())?;
-    if choice == EncodingChoice::Auto {
+    let glyph_encoding = cmvs_core::patch::text_encoding(&root)?;
+    let encoding = if glyph_encoding == cmvs_core::text_encoding::TextEncoding::Gbk {
+        println!("# PKP translation overlay: GBK script and glyph encoding");
+        TextEncoding::Gbk
+    } else {
+        choice.resolve(script.text())?
+    };
+    if choice == EncodingChoice::Auto
+        && glyph_encoding != cmvs_core::text_encoding::TextEncoding::Gbk
+    {
         let name = match encoding {
             TextEncoding::ShiftJis => "shift-jis",
             TextEncoding::Gbk => "gbk",
@@ -937,15 +949,20 @@ fn run() -> Result<(), Box<dyn Error>> {
             "# auto encoding={name}; inferred from startup script text; override with --encoding <name> if incorrect"
         );
     }
-    if font_path.is_some() && (record_text || encoding != TextEncoding::ShiftJis) {
+    if font_path.is_some()
+        && (record_text
+            || (encoding != TextEncoding::ShiftJis
+                && glyph_encoding != cmvs_core::text_encoding::TextEncoding::Gbk))
+    {
         return Err(
-            "--font requires shift-jis encoding and cannot be combined with --record-text".into(),
+            "--font requires Shift-JIS or a GBK PKP overlay and cannot be combined with --record-text".into(),
         );
     }
     let font = font_path
         .as_ref()
         .map(|path| crate::font::FontRenderer::read(path, font_face.unwrap_or(0)))
-        .transpose()?;
+        .transpose()?
+        .map(|font| font.with_encoding(glyph_encoding));
     let bindings = if native_input {
         use std::io::Read;
         let mut text = String::new();
@@ -1027,7 +1044,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if font.is_some() {
         println!(
-            "# OpenType font preview enabled; explicit font file, Shift-JIS, supported single-line layout; glyph masks differ from GDI"
+            "# OpenType font preview enabled; explicit font file, game text encoding; glyph masks differ from GDI"
         );
     }
     if record_text {
@@ -1058,6 +1075,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         startup,
         assets: DirectoryAssets::new(&root)?,
         encoding,
+        pkp_title: glyph_encoding == cmvs_core::text_encoding::TextEncoding::Gbk,
         input: DesktopInput::default(),
         game_input,
         bindings,

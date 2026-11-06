@@ -179,6 +179,7 @@ pub struct NativeBackend<'a> {
     pub window: &'a Window,
     pub event_loop: &'a ActiveEventLoop,
     pub encoding: TextEncoding,
+    pub pkp_title: bool,
     pub aspect_mode: &'a std::cell::Cell<u32>,
     pub aspect_scaling: &'a std::cell::Cell<bool>,
     pub render_mode: &'a std::cell::Cell<u32>,
@@ -382,7 +383,22 @@ impl PlatformBackend for NativeBackend<'_> {
                 println!("# native fullscreen={value}");
             }
             PlatformRequest::Title(bytes) => {
-                let title = self.encoding.decode(bytes)?;
+                // PKP replaces scene strings but leaves the startup title in Shift-JIS.
+                // The original title composer inserts its own Shift-JIS full-width space.
+                let title = if self.pkp_title {
+                    let end = bytes
+                        .windows(2)
+                        .position(|w| w == [0x81, 0x40])
+                        .unwrap_or(bytes.len());
+                    let mut title = TextEncoding::ShiftJis.decode(&bytes[..end])?;
+                    if end < bytes.len() {
+                        title.push('　');
+                        title.push_str(&TextEncoding::Gbk.decode(&bytes[end + 2..])?);
+                    }
+                    title
+                } else {
+                    self.encoding.decode(bytes)?
+                };
                 self.window.set_title(&title);
                 println!("# native title={title}");
             }

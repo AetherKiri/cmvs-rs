@@ -193,6 +193,8 @@ impl<'a> Startup<'a> {
                 .fill_strings(0, strings, b"")
                 .map_err(crate::FormatError)?;
         }
+        let encoding = crate::patch::text_encoding(root)?;
+        machine.encoding = encoding;
         machine.set_current_name(game.files.start_name());
         // 0x14000a3c0 reads the startup settings; cmvs.cfg is optional and read only.
         let configuration = crate::settings::Configuration::read(&root.join("cmvs.cfg"))?
@@ -206,6 +208,7 @@ impl<'a> Startup<'a> {
         camera.set_screen_size(screen_size);
         let mut messages = MessageHost::for_profile(game.selection.profile);
         messages.set_screen_size(screen_size);
+        messages.set_encoding(encoding);
         let text = configuration.bytes();
         let mut save_menu = SaveMenuHost::default();
         save_menu.set_confirmations(
@@ -243,7 +246,8 @@ impl<'a> Startup<'a> {
                     .and_then(|s| s.to_str())
                     .ok_or(crate::FormatError("archive basename is not UTF-8"))?
                     .as_bytes(),
-            )?,
+            )?
+            .with_patch(root)?,
             saves: DirectorySaves::new(root.join("save"))?,
             save_menu,
             system_source: FileSystemSave::new(root.join("save/system.dat")),

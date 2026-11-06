@@ -61,6 +61,7 @@ fn create(code: &mut Vec<u8>, slot: u32, text: u32, rect: [u32; 4]) {
 /// The text object 0x215d leaves after 0x14005d3b0, for a 1280x720 logical size.
 fn created_text(position: [i32; 2], size: [u32; 2]) -> TextObject {
     TextObject {
+        encoding: Default::default(),
         font_face: Vec::new(),
         face: cmvs_rs::settings::DEFAULT_FONT_FACE.into(),
         bold: false,

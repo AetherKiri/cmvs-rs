@@ -27,9 +27,13 @@ const MAX_FONT: usize = 32 * 1024 * 1024;
 pub struct FontRenderer {
     library: Arc<Mutex<FontLibrary>>,
     cache: GlyphCache,
+    encoding: cmvs_core::text_encoding::TextEncoding,
 }
 
-struct PreviewMetrics(Arc<Mutex<FontLibrary>>);
+struct PreviewMetrics(
+    Arc<Mutex<FontLibrary>>,
+    cmvs_core::text_encoding::TextEncoding,
+);
 impl PreviewMetrics {
     fn font(&self, face: &[u8], ch: char) -> Result<Arc<FontVec>, &'static str> {
         self.0
@@ -54,7 +58,7 @@ impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
         if !(1..=128).contains(&size) {
             return Err("glyph size outside 1..128 preview range");
         }
-        let ch = character(code).map_err(|e| e.0)?;
+        let ch = character_encoded(code, self.1).map_err(|e| e.0)?;
         let font = self.font(face, ch)?;
         let advance = font.as_scaled(size as f32).h_advance(font.glyph_id(ch));
         if !advance.is_finite() || advance < 0.0 || advance > u16::MAX as f32 {
@@ -80,7 +84,7 @@ impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
         if !(1..=128).contains(&size) {
             return Err("glyph size outside 1..128 preview range");
         }
-        let ch = character(code).map_err(|e| e.0)?;
+        let ch = character_encoded(code, self.1).map_err(|e| e.0)?;
         let font = self.font(face, ch)?;
         let id = font.glyph_id(ch);
         let scale = size as f32;
@@ -106,16 +110,31 @@ impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
     }
 }
 
+#[cfg(test)]
 fn character(code: u16) -> Result<char, FormatError> {
+    character_encoded(code, cmvs_core::text_encoding::TextEncoding::ShiftJis)
+}
+fn character_encoded(
+    code: u16,
+    encoding: cmvs_core::text_encoding::TextEncoding,
+) -> Result<char, FormatError> {
+    use cmvs_core::text_encoding::TextEncoding;
+    if encoding == TextEncoding::Gbk && code == 0xa2e1 {
+        return Ok('♪');
+    }
     let pair = code.to_be_bytes();
     let bytes = if code <= 0x7f || code >= 0xff80 {
         &pair[1..]
     } else {
         &pair[..]
     };
-    let text = encoding_rs::SHIFT_JIS
+    let decoder = match encoding {
+        TextEncoding::ShiftJis => encoding_rs::SHIFT_JIS,
+        TextEncoding::Gbk => encoding_rs::GBK,
+    };
+    let text = decoder
         .decode_without_bom_handling_and_without_replacement(bytes)
-        .ok_or(FormatError("invalid Shift-JIS glyph code"))?;
+        .ok_or(FormatError("invalid glyph code for selected text encoding"))?;
     let mut chars = text.chars();
     let ch = chars.next().ok_or(FormatError("empty glyph code"))?;
     if chars.next().is_some() || ch == '\0' {
@@ -239,6 +258,7 @@ impl FontRenderer {
         Ok(Self {
             library: Arc::new(Mutex::new(FontLibrary::new(Arc::new(font)))),
             cache: GlyphCache::default(),
+            encoding: Default::default(),
         })
     }
     /// Uses `library` (sharing its explicit default font) for every face.
@@ -246,12 +266,19 @@ impl FontRenderer {
         Self {
             library: Arc::new(Mutex::new(library)),
             cache: GlyphCache::default(),
+            encoding: Default::default(),
         }
+    }
+    /// Select the script overlay's byte encoding before rendering or creating metrics.
+    pub fn with_encoding(mut self, encoding: cmvs_core::text_encoding::TextEncoding) -> Self {
+        self.encoding = encoding;
+        self.cache = GlyphCache::default();
+        self
     }
     /// Matches this renderer's fonts; OpenType ink bounds replace GDI's
     /// device metrics. Whitespace deterministically has zero ink extent.
     pub fn metrics(&self) -> Box<dyn cmvs_core::message::GlyphMetrics> {
-        Box::new(PreviewMetrics(Arc::clone(&self.library)))
+        Box::new(PreviewMetrics(Arc::clone(&self.library), self.encoding))
     }
     /// Whether a face in the game encoding resolves to a font (startup check).
     pub fn has_face(&self, face: &[u8]) -> bool {
@@ -347,7 +374,7 @@ impl FontRenderer {
         if let Some(image) = self.cache.get(&key) {
             return Ok(image.clone());
         }
-        let ch = character(glyph.code)?;
+        let ch = character_encoded(glyph.code, self.encoding)?;
         let font = self.font(&glyph.face, ch)?;
         let id = font.glyph_id(ch);
         let scale = glyph.size as f32;
@@ -650,6 +677,10 @@ mod tests {
     #[test]
     fn glyph_codes_decode_strictly_including_sign_extended_halfwidth() {
         assert_eq!(character(0x82a0).unwrap(), 'あ');
+        use cmvs_core::text_encoding::TextEncoding::Gbk;
+        assert_eq!(character_encoded(0xc4e3, Gbk).unwrap(), '你');
+        assert_eq!(character_encoded(0xd7ef, Gbk).unwrap(), '罪');
+        assert_eq!(character_encoded(0xa2e1, Gbk).unwrap(), '♪');
         assert_eq!(character(0xffb1).unwrap(), 'ｱ');
         assert_eq!(character(65).unwrap(), 'A');
         assert!(character(0).is_err());

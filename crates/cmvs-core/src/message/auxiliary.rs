@@ -195,6 +195,7 @@ pub struct AuxiliaryGlyph {
 /// glyphs currently attached to the atlas object. Glyph pixels belong to the backend.
 #[derive(Debug, Clone)]
 pub struct AuxiliaryText {
+    pub encoding: crate::text_encoding::TextEncoding,
     /// Current face of the slot's persistent font object; existing glyphs own their face.
     pub face: std::sync::Arc<[u8]>,
     pub revision_alpha: bool,
@@ -443,6 +444,7 @@ impl AuxiliaryText {
         draw.set(DrawSetter::Source([0, 0, 4, 4]));
         draw.set(DrawSetter::Layer(1));
         Ok(Self {
+            encoding: Default::default(),
             face: std::sync::Arc::from(crate::settings::DEFAULT_FONT_FACE),
             revision_alpha: false,
             words,
