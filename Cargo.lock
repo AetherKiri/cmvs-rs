@@ -328,6 +328,7 @@ version = "0.1.0"
 dependencies = [
  "miniz_oxide 0.8.9",
  "png",
+ "rustix 1.1.6",
  "wasm-bindgen",
 ]
 
