@@ -18,8 +18,13 @@ even when the parent application is Debug. Build one architecture at a time.
 
 Before opening a game directory, set `default_font` to an available OpenType
 font and provide a writable user directory. For Chinese patches the font must
-contain Chinese glyphs. Saves, settings and font preferences use a stable
-per-game subdirectory below `<writable>/cmvs/`. Resource files remain read-only.
+contain Chinese glyphs. Gameplay slots (`saveNNN.dat`), system progress
+(`system.dat`), settings (`cmvs.cfg`) and font preferences live in
+`<game>/savedata/`. The previous `<writable>/cmvs/<game-hash>/` profile is
+imported once without replacing existing local files or deleting old saves.
+Read-only game directories retain that external per-game profile. Lock
+contention, invalid paths and corrupt saves are reported instead of switching
+to an empty profile. Game resource files remain read-only.
 `cmvs_native_audio=0` selects the deterministic VM clock for automated replays;
 native audio is enabled by default. Input coordinates are logical frame pixels.
 Pause and pointer cancellation release held input. Unsupported CMVS options
@@ -64,6 +69,13 @@ opens the game's startup resources twice with native audio and pause/resume.
 This verifies the embedding and audio lifecycle; a complete Aether Android APK
 and physical Android device gameplay have not been validated locally.
 
+The game-local save regression runs both original Japanese and PKP-translated
+Amatsutsumi resources through the shared player: save, close, reopen, load and
+resave produce identical gameplay snapshot bytes. The provider replay also
+checks that preferences land in `game/savedata/cmvs.cfg` instead of application
+storage. Storage tests cover one-time migration, existing local saves, profile
+locks, backups, read-only fallback and rejection of redirected save directories.
+
 From the parent Aether checkout, a standalone provider contract test can be run
 without distributing game assets:
 
@@ -77,4 +89,6 @@ ctest --test-dir out/cmvs-provider --output-on-failure
 
 The executable optionally accepts `/path/to/game /path/to/font.otf /path/to/frame.ppm`
 to replay the Amatsutsumi opening in an isolated temporary save directory.
+The probe hard-links resource files into a temporary game directory; set
+`TMPDIR` to a writable directory on the game's filesystem if necessary.
 No game assets or generated snapshots belong in this repository.

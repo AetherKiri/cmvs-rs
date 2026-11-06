@@ -34,11 +34,21 @@ int main(int argc, char** argv) {
     engine_option_t invalid{}; invalid.key_utf8 = "cmvs_unknown"; invalid.value_utf8 = "1";
     require(provider->set_option(runtime, &invalid) == ENGINE_RESULT_NOT_SUPPORTED, "unknown provider option");
     if (argc == 4) {
+        // Keep real-installation probes isolated now that the provider prefers
+        // game-local saves. Hard links keep resolved resources inside the
+        // fixture; all writable files belong to its new savedata directory.
+        const auto game = fixture / "game";
+        create_directory(game);
+        for (const auto& entry : directory_iterator(canonical(argv[1]))) {
+            if (entry.path().filename() != "savedata")
+                copy(entry.path(), game / entry.path().filename(),
+                     copy_options::recursive | copy_options::create_hard_links);
+        }
         engine_option_t font{}; font.key_utf8 = "default_font"; font.value_utf8 = argv[2];
         require(provider->set_option(runtime, &font) == 0, "font option");
         engine_option_t audio{}; audio.key_utf8 = "cmvs_native_audio"; audio.value_utf8 = "0";
         require(provider->set_option(runtime, &audio) == 0, "deterministic audio clock");
-        const int opened = provider->open_game(runtime, argv[1], "");
+        const int opened = provider->open_game(runtime, game.c_str(), "");
         if (opened != 0) std::cerr << provider->get_last_error(runtime) << '\n';
         require(opened == 0, "game open");
         auto advance = [&](uint64_t frames) {
@@ -74,6 +84,10 @@ int main(int argc, char** argv) {
         std::cout << "CMVS_GAME_OK frames=" << frame.frame_serial << '\n';
     }
     provider->destroy(runtime);
+    if (argc == 4) {
+        require(is_regular_file(fixture / "game/savedata/cmvs.cfg"), "game-local preferences");
+        require(!exists(fixture / "user/cmvs"), "writable game must not use app save directory");
+    }
     remove_all(fixture);
     std::cout << "CMVS_PROVIDER_OK\n";
 }
