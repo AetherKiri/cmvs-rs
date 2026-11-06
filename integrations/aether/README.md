@@ -1,6 +1,7 @@
 # Aether CMVS provider
 
-This Apple provider implements Aether's `engine_runtime_provider_v1_t` with the
+This provider implements Aether's `engine_runtime_provider_v1_t` on macOS,
+iOS, Android and Linux with the
 shared Rust `cmvs-host` player. Aether owns the library, window and presentation;
 CMVS produces CPU RGBA8 frames and owns native audio, script execution and saves.
 The provider probes `data/pack/start.ps2` or `start.ps3` and `script.cpz` by magic,
@@ -8,7 +9,9 @@ then requires a supported startup fingerprint when opening the game.
 
 The parent build adds this directory and links `aether_cmvs_runtime`, then calls
 `aetherkiri::cmvs::RegisterRuntimeProvider()`. Rust stable and the target selected
-by the Apple CMake toolchain must be installed. `AETHERKIRI_CMVS_ABI_INCLUDE`
+by the CMake toolchain must be installed. The shared
+[`platforms/host`](../../platforms/host/README.md) target selects the Rust triple,
+NDK compiler wrappers and native audio link dependencies. `AETHERKIRI_CMVS_ABI_INCLUDE`
 points to Aether's `abi/include`; `AETHERKIRI_CMVS_CARGO_TARGET_DIR` optionally
 selects a reusable Cargo cache. The compositor is optimized with debug symbols
 even when the parent application is Debug. Build one architecture at a time.
@@ -27,6 +30,15 @@ its plugin archive and link the frameworks exported by this CMake target,
 including AVFAudio. Both device and simulator Rust targets are selected from
 the toolchain SDK, including Xcode's normalized absolute SDK paths.
 
+Android supports arm64-v8a, armeabi-v7a, x86_64 and x86 with API 26 or later.
+Before opening with native audio, the parent calls `InitializeAndroidContext`
+with its Java VM and a JNI global Application reference retained for the process.
+This is independent of Activity recreation and must happen before an asynchronous
+game open. The provider links AAudio and uses nonblocking OS file locks for saves.
+Linux supports aarch64 and x86_64 with glibc and ALSA development packages.
+When combining multiple Rust static runtimes on Android/Linux, the parent must
+use the same Rust toolchain and resolve duplicate std/alloc symbols at final link.
+
 ## Validation
 
 The complete Aether macOS Debug application was built with its normal runtime
@@ -41,6 +53,16 @@ the same Rust host also builds on both targets and runs the translated opening
 in the iOS 18.3 simulator. A complete Aether iOS application and physical iOS
 device execution have not been validated in this change. See the Apple player
 README for save/restart/load coverage and the complete-route coverage limit.
+
+On Linux arm64, the provider builds and passes its ABI contract test, then runs
+the translated Amatsutsumi opening for 2,770 frames into Chinese dialogue.
+Android API 26 provider executables link for all four ABIs with NDK 28.2.
+An API 33 arm64 emulator passes the provider contract, host error/input tests,
+and six save-profile tests covering locking, atomic replacement, backups and
+reopening. An Android application harness using Aether's context initialization
+opens the game's startup resources twice with native audio and pause/resume.
+This verifies the embedding and audio lifecycle; a complete Aether Android APK
+and physical Android device gameplay have not been validated locally.
 
 From the parent Aether checkout, a standalone provider contract test can be run
 without distributing game assets:

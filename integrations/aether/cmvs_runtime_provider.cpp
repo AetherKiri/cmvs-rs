@@ -12,6 +12,11 @@
 #include <string>
 
 namespace aetherkiri::cmvs {
+#if defined(__ANDROID__)
+bool InitializeAndroidContext(void* java_vm, void* application_context) {
+    return cmvs_host_initialize_android(java_vm, application_context) == 0;
+}
+#endif
 namespace {
 struct Runtime {
     CmvsHost* core = cmvs_host_create();
