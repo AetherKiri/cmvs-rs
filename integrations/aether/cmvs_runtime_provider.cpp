@@ -195,6 +195,14 @@ const engine_runtime_provider_v1_t& Provider() {
         p.pause = Pause; p.resume = Resume; p.set_option = Option; p.set_surface_size = Resize;
         p.get_frame_desc = Frame; p.read_frame_rgba = Read; p.send_input = Input;
         p.get_frame_rendered_flag = Rendered; p.get_renderer_info = Renderer;
+#ifdef ENGINE_BACKGROUND_PLAYBACK_QUERY
+        // The host backend uses CPU composition and native Core Audio on iOS;
+        // it does not depend on the foreground window or Godot rendering.
+        p.background_playback = [](void* runtime, uint32_t mode) {
+            if (!runtime || mode > ENGINE_BACKGROUND_PLAYBACK_LEAVE) return ENGINE_RESULT_INVALID_ARGUMENT;
+            return cast(runtime)->opened ? ENGINE_RESULT_OK : ENGINE_RESULT_INVALID_STATE;
+        };
+#endif
         p.get_text_input_state = TextInput; p.get_last_error = Error; return p;
     }(); return provider;
 }

@@ -29,6 +29,12 @@ int main(int argc, char** argv) {
     require(provider->create(nullptr, &host, &desc, &runtime) == 0 && runtime, "create");
     engine_frame_desc_t frame{}; frame.struct_size = sizeof(frame);
     require(provider->get_frame_desc(runtime, &frame) == ENGINE_RESULT_INVALID_STATE, "unopened frame");
+#ifdef ENGINE_BACKGROUND_PLAYBACK_QUERY
+    require(provider->background_playback &&
+        provider->background_playback(runtime, ENGINE_BACKGROUND_PLAYBACK_QUERY) == ENGINE_RESULT_INVALID_STATE,
+        "unopened background playback");
+    require(provider->background_playback(runtime, 99) == ENGINE_RESULT_INVALID_ARGUMENT, "invalid background mode");
+#endif
     require(provider->send_input(runtime, nullptr) == ENGINE_RESULT_INVALID_ARGUMENT, "null input");
     require(provider->set_surface_size(runtime, 0, 1) == ENGINE_RESULT_INVALID_ARGUMENT, "invalid surface");
     engine_option_t invalid{}; invalid.key_utf8 = "cmvs_unknown"; invalid.value_utf8 = "1";
@@ -51,6 +57,10 @@ int main(int argc, char** argv) {
         const int opened = provider->open_game(runtime, game.c_str(), "");
         if (opened != 0) std::cerr << provider->get_last_error(runtime) << '\n';
         require(opened == 0, "game open");
+#ifdef ENGINE_BACKGROUND_PLAYBACK_QUERY
+        require(provider->background_playback(runtime, ENGINE_BACKGROUND_PLAYBACK_QUERY) == 0, "CPU background capability");
+        require(provider->background_playback(runtime, ENGINE_BACKGROUND_PLAYBACK_ENTER) == 0, "enter background playback");
+#endif
         auto advance = [&](uint64_t frames) {
             require(provider->get_frame_desc(runtime, &frame) == 0, "frame descriptor");
             const auto end = frame.frame_serial + frames;
@@ -63,6 +73,12 @@ int main(int argc, char** argv) {
             require(frame.frame_serial >= end, "frame budget");
         };
         advance(700);
+        require(provider->pause(runtime) == 0, "pause background playback");
+        const auto paused_serial = frame.frame_serial;
+        for (int i = 0; i < 20; ++i) require(provider->tick(runtime, 50) == 0, "paused background tick");
+        require(provider->get_frame_desc(runtime, &frame) == 0 && frame.frame_serial == paused_serial,
+                "paused playback cannot advance story or animation");
+        require(provider->resume(runtime) == 0, "resume background playback");
         engine_input_event_t click{}; click.struct_size = sizeof(click);
         click.type = ENGINE_INPUT_EVENT_POINTER_DOWN; click.button = 0; click.x = 640; click.y = 280;
         require(provider->send_input(runtime, &click) == 0, "primary down");
@@ -81,6 +97,9 @@ int main(int argc, char** argv) {
         std::ofstream out(argv[3], std::ios::binary); out << "P6\n" << frame.width << ' ' << frame.height << "\n255\n";
         for (size_t i=0; i<rgba.size(); i+=4) out.write(reinterpret_cast<char*>(rgba.data()+i), 3);
         require(provider->pause(runtime) == 0 && provider->resume(runtime) == 0, "pause resume");
+#ifdef ENGINE_BACKGROUND_PLAYBACK_QUERY
+        require(provider->background_playback(runtime, ENGINE_BACKGROUND_PLAYBACK_LEAVE) == 0, "return to foreground");
+#endif
         std::cout << "CMVS_GAME_OK frames=" << frame.frame_serial << '\n';
     }
     provider->destroy(runtime);
