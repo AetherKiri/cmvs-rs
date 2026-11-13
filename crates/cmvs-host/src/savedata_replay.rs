@@ -1,6 +1,7 @@
 //! Optional real-installation regression; the source game is never modified.
 use super::Player;
 use cmvs_core::save::Csv2Save;
+use cmvs_core::system_save::{Css1Parameters, Css1Save};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -75,12 +76,21 @@ fn amatsutsumi_game_savedata_survives_player_restart() {
     let legacy = fixture.join("legacy");
     let savedata = game.join("savedata");
     let mut player = Player::open_game_savedata(&game, &legacy, &font, false).unwrap();
+    player.skip_auto_resume().unwrap();
     advance(&mut player, 700);
+    assert_eq!(
+        player.session.borrow_dependent().machine().current_name(),
+        b"menu.ps3"
+    );
+    assert!(
+        player.skip_auto_resume().is_err(),
+        "startup policy cannot change a running game"
+    );
     player.pointer(640, 280);
     player.key(1, true).unwrap();
     player.key(1, false).unwrap();
     advance(&mut player, 1800);
-    for _ in 0..3 {
+    for _ in 0..20 {
         player.key(22, true).unwrap();
         player.key(22, false).unwrap();
         advance(&mut player, 90);
@@ -92,15 +102,71 @@ fn amatsutsumi_game_savedata_survives_player_restart() {
             .unwrap()
     );
     player.save_preferences().unwrap();
+    assert_ne!(
+        player.session.borrow_dependent().machine().current_name(),
+        b"menu.ps3"
+    );
+    // Emulate the game's native close path: it records a resume slot and sets
+    // the profile's startup flag. Aether's shell exit bypasses that game menu.
+    assert!(
+        player
+            .session
+            .with_dependent_mut(|_, s| s.save_slot(870))
+            .unwrap()
+    );
+    let startup = player.session.borrow_dependent();
+    let record = startup.gate().selection().record.unwrap();
+    let mut state = startup.machine().state().clone();
+    state
+        .set_integer(record.skip_auto_resume.unwrap(), 1)
+        .unwrap();
+    let system = Css1Save::decode(&fs::read(savedata.join("system.dat")).unwrap()).unwrap();
+    let resume_system = system
+        .encode_state(
+            &state,
+            record.game_id,
+            Css1Parameters {
+                byte_add: 0,
+                key_add: 128,
+                rotation_word: 0,
+            },
+            [system.lists()[0].as_slice(), system.lists()[1].as_slice()],
+        )
+        .unwrap();
+    let resume = fs::read(savedata.join("save870.dat")).unwrap();
     let slot = fs::read(savedata.join("save001.dat")).unwrap();
     let saved = Csv2Save::decode(&slot).unwrap();
     assert!(savedata.join("system.dat").is_file());
     assert!(savedata.join("cmvs.cfg").is_file());
     assert!(!legacy.exists());
     drop(player);
+    fs::write(savedata.join("system.dat"), resume_system).unwrap();
+
+    // A brand-new native player resumes from disk, without retaining the old VM.
+    // The library launch policy must override only that automatic startup load.
+    let mut native = Player::open_game_savedata(&game, &legacy, &font, false).unwrap();
+    advance(&mut native, 700);
+    assert_ne!(
+        native.session.borrow_dependent().machine().current_name(),
+        b"menu.ps3"
+    );
+    assert!(!native.session.borrow_dependent().auto_resume_skipped());
+    drop(native);
 
     let mut restarted = Player::open_game_savedata(&game, &legacy, &font, false).unwrap();
+    restarted.skip_auto_resume().unwrap();
     advance(&mut restarted, 700);
+    assert_eq!(
+        restarted
+            .session
+            .borrow_dependent()
+            .machine()
+            .current_name(),
+        b"menu.ps3"
+    );
+    assert!(restarted.session.borrow_dependent().auto_resume_skipped());
+    assert_eq!(fs::read(savedata.join("save870.dat")).unwrap(), resume);
+    assert_eq!(fs::read(savedata.join("save001.dat")).unwrap(), slot);
     restarted
         .session
         .with_dependent_mut(|_, s| s.load_slot(1, &mut restarted.backend))

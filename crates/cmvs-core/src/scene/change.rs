@@ -85,17 +85,26 @@ fn common_image(old: &ObjectImage, new: &ObjectImage) -> Result<ObjectImage, Box
     let width = old.pixels.width().min(new.pixels.width());
     let height = old.pixels.height().min(new.pixels.height());
     let mut pixels = vec![0; (u64::from(width) * u64::from(height) * 4) as usize];
-    let old_x = (old.pixels.width() - width) >> 1;
-    let new_x = (new.pixels.width() - width) >> 1;
-    for y in 0..height {
-        for x in 0..width {
-            let a = ((u64::from(y) * u64::from(old.pixels.width()) + u64::from(old_x + x)) * 4)
-                as usize;
-            let b = ((u64::from(y) * u64::from(new.pixels.width()) + u64::from(new_x + x)) * 4)
-                as usize;
-            if old.pixels.pixels()[a + 3] == 255 && new.pixels.pixels()[b + 3] == 255 {
-                let dst = ((u64::from(y) * u64::from(width) + u64::from(x)) * 4) as usize;
-                pixels[dst..dst + 4].copy_from_slice(&new.pixels.pixels()[b..b + 4]);
+    let old_x = ((old.pixels.width() - width) >> 1) as usize;
+    let new_x = ((new.pixels.width() - width) >> 1) as usize;
+    let (row, old_width, new_width) = (
+        width as usize * 4,
+        old.pixels.width() as usize,
+        new.pixels.width() as usize,
+    );
+    for y in 0..height as usize {
+        let old_row = &old.pixels.pixels()[(y * old_width + old_x) * 4..][..row];
+        let new_row = &new.pixels.pixels()[(y * new_width + new_x) * 4..][..row];
+        let out = &mut pixels[y * row..][..row];
+        for ((target, a), b) in out
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(old_row.as_chunks::<4>().0)
+            .zip(new_row.as_chunks::<4>().0)
+        {
+            if a[3] == 255 && b[3] == 255 {
+                *target = *b;
             }
         }
     }
@@ -252,7 +261,12 @@ impl SceneHost {
             return Ok(());
         };
         if args[3] != 0 {
-            return Err(fail("secondary replacement image manager is not implemented").into());
+            if !self.allow_stand_change_table {
+                return Err(fail("secondary replacement image manager is not implemented").into());
+            }
+            // cmvs-20070119 0x4076f0: the stand table (searched after 0x2011 here, see
+            // ResourceKind::Image) with its next-read cache armed (0x414030).
+            images.cache_next_read()?;
         }
         let prepared = self.prepare_image_change(slot, &name, args[2], images, pc, 0x22c4)?;
         call.complete(0x4010)?;
@@ -274,10 +288,31 @@ impl SceneHost {
         pc: usize,
         opcode: u16,
     ) -> Result<Option<PreparedChange>, Box<dyn Error>> {
+        self.objects
+            .get(&slot)
+            .map(|old| old.prepare_image_change(name, duration, images, pc, opcode))
+            .transpose()
+    }
+
+    pub(crate) fn commit_image_change(&mut self, slot: u8, prepared: PreparedChange) {
+        self.objects
+            .get_mut(&slot)
+            .expect("validated slot")
+            .commit_image_change(prepared);
+    }
+}
+
+impl SceneObject {
+    pub(crate) fn prepare_image_change(
+        &self,
+        name: &[u8],
+        duration: u32,
+        images: &mut dyn ImageSource,
+        pc: usize,
+        opcode: u16,
+    ) -> Result<PreparedChange, Box<dyn Error>> {
         let fail = |why| error(pc, opcode, why);
-        let Some(old) = self.objects.get(&slot) else {
-            return Ok(None);
-        };
+        let old = self;
         if old.secondary_image.is_some() {
             return Err(
                 fail("replacement of an object with a second texture is not verified").into(),
@@ -294,7 +329,7 @@ impl SceneHost {
         let mut image = load_image(images, name.to_vec(), pc, opcode)?
             .ok_or_else(|| fail("missing replacement image leaves an unmodeled partial object"))?;
         if let Some(filter) = old_image.filter {
-            image.apply_filter(filter)?;
+            image.apply_filter_cached(filter, images)?;
         }
         // 0x14003c900 copies the first 88 bytes, then 0x14001f520 copies +88..+108 into
         // both the new and the common draw state.
@@ -337,22 +372,22 @@ impl SceneHost {
         } else {
             None
         };
-        Ok(Some(PreparedChange {
+        Ok(PreparedChange {
             image,
             draw,
             common,
             duration,
-        }))
+        })
     }
 
-    pub(crate) fn commit_image_change(&mut self, slot: u8, prepared: PreparedChange) {
+    pub(crate) fn commit_image_change(&mut self, prepared: PreparedChange) {
         let PreparedChange {
             image,
             mut draw,
             common,
             duration,
         } = prepared;
-        let mut previous = self.objects.remove(&slot).expect("validated slot");
+        let mut previous = std::mem::take(self);
         previous.cancel_change();
         let old_draw = previous.draw.as_mut().expect("validated draw");
         draw.scale_motion = old_draw.scale_motion.take();
@@ -376,7 +411,7 @@ impl SceneHost {
                 elapsed: 0,
             }));
         }
-        self.objects.insert(slot, replacement);
+        *self = replacement;
     }
 }
 

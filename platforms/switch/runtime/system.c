@@ -1,15 +1,16 @@
 #include <switch.h>
 #include <string.h>
 
-/* Copies the system's Japan/US/Europe shared font (plain TrueType in pl shared
-   memory) into `out`. Returns the font size, 0 when unavailable, or the required
+/* Copies the system's Japan/US/Europe shared font, or with `chinese` its simplified
+   Chinese one (plain TrueType in pl shared memory), into `out`. Returns the font size, 0 when unavailable, or the required
    size without copying when `capacity` is too small. */
-size_t cmvs_nx_shared_font(void *out, size_t capacity) {
+size_t cmvs_nx_shared_font(int chinese, void *out, size_t capacity) {
     if (R_FAILED(plInitialize(PlServiceType_User)))
         return 0;
     PlFontData font = {0};
     size_t size = 0;
-    if (R_SUCCEEDED(plGetSharedFontByType(&font, PlSharedFontType_Standard)) && font.address) {
+    PlSharedFontType type = chinese ? PlSharedFontType_ChineseSimplified : PlSharedFontType_Standard;
+    if (R_SUCCEEDED(plGetSharedFontByType(&font, type)) && font.address) {
         size = font.size;
         if (out && size <= capacity)
             memcpy(out, font.address, size);
@@ -23,6 +24,21 @@ size_t cmvs_nx_shared_font(void *out, size_t capacity) {
 int cmvs_nx_set_cpu_boost(int enabled) {
     Result rc = appletSetCpuBoostMode(enabled ? ApmCpuBoostMode_FastLoad : ApmCpuBoostMode_Normal);
     return R_SUCCEEDED(rc) ? 0 : -1;
+}
+
+/* The memory available to the process in bytes, 0 when unknown: over 3 GiB as an
+   application, a few hundred MiB as an applet. */
+u64 cmvs_nx_total_memory(void) {
+    u64 bytes = 0;
+    if (R_FAILED(svcGetInfo(&bytes, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0)))
+        return 0;
+    return bytes;
+}
+
+/* Runs the calling thread on `core` alone (applications own cores 0..2). Returns 0 on
+   success. */
+int cmvs_nx_prefer_core(int core) {
+    return R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core)) ? 0 : -1;
 }
 
 /* Shows the error applet, blocking until dismissed. The application variant (the one

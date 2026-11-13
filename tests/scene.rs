@@ -188,7 +188,7 @@ fn world_query_missing_child_is_retryable_and_does_not_write_results() {
 }
 
 #[test]
-fn special_effect_reset_destroys_children_but_retains_the_parent_draw_and_flags() {
+fn special_effect_reset_retains_ordinary_children_parent_draw_and_flags() {
     let mut code = vec![];
     for (op, args) in [
         (0x2020, vec![7]),
@@ -211,7 +211,7 @@ fn special_effect_reset_destroys_children_but_retains_the_parent_draw_and_flags(
     for _ in 0..2 {
         assert!(next(&mut vm, &mut scene).unwrap());
         let actual = scene.object(7).unwrap();
-        assert!(actual.children.is_empty());
+        assert_eq!(actual.children, before.children);
         assert_eq!(actual.draw, before.draw);
         assert_eq!(actual.flags, before.flags);
     }
@@ -952,7 +952,12 @@ fn motion_xyz(scene: &SceneHost, slot: u8) -> [f32; 3] {
 
 #[test]
 fn y_half_turn_modes_use_distinct_amplitudes_and_snap_at_the_boundary() {
-    for id in ["cmvs-20071117", "cmvs-20080719", "cmvs-20080903"] {
+    for id in [
+        "cmvs-20071117",
+        "cmvs-20080719",
+        "cmvs-20080903",
+        "cmvs-20090815",
+    ] {
         let profile = cmvs_rs::profile::Registry::builtin().profile(id).unwrap();
         for (mode, quarter_y, middle_y) in [
             (0x20, 2.7, 3.0),
@@ -1013,7 +1018,12 @@ fn y_half_turn_modes_use_distinct_amplitudes_and_snap_at_the_boundary() {
 
 #[test]
 fn legacy_x_full_turn_uses_full_amplitude_and_preserves_yz_bits() {
-    for id in ["cmvs-20071117", "cmvs-20080719", "cmvs-20080903"] {
+    for id in [
+        "cmvs-20071117",
+        "cmvs-20080719",
+        "cmvs-20080903",
+        "cmvs-20090815",
+    ] {
         let profile = cmvs_rs::profile::Registry::builtin().profile(id).unwrap();
         for (mode, amplitude) in [
             (0x00c80040, 2.0f32),
@@ -1069,7 +1079,12 @@ fn legacy_x_full_turn_uses_full_amplitude_and_preserves_yz_bits() {
 
 #[test]
 fn y_half_turn_mode_requires_the_inspected_profile_and_hash() {
-    for id in ["cmvs-20071117", "cmvs-20080719", "cmvs-20080903"] {
+    for id in [
+        "cmvs-20071117",
+        "cmvs-20080719",
+        "cmvs-20080903",
+        "cmvs-20090815",
+    ] {
         let profile = cmvs_rs::profile::Registry::builtin().profile(id).unwrap();
         let mut changed_hash = profile.clone();
         changed_hash.binaries[0].sha256 = [0; 32];
@@ -2021,6 +2036,7 @@ fn inspected_child_tables_support_the_last_slot_and_ignore_unsigned_create_overf
     for (id, limit) in [
         ("cmvs-20071117", 256),
         ("cmvs-20080903", 256),
+        ("cmvs-20090815", 256),
         ("cmvs-20120309", 512),
         ("cmvs-20190305", 1024),
         ("cmvs-20190405", 1024),

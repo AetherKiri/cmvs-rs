@@ -21,10 +21,18 @@ pub use vm_state::VmSnapshot;
 /// bounded by their own decoders; a layout does not grant support for unknown records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotLayout {
+    /// Inspected 20070119: unversioned scene header, image/draw/text v1.
+    TextV1SceneLegacy,
     /// Inspected 20071117: text/window/scene v1, draw v3 and a single BGM name.
     TextV1SceneV1,
     /// Inspected 20080719: text/window v1, scene v2, draw/movie v4, paired BGM.
     TextV1SceneV2,
+    /// MEMORIA: scene v2 additionally carries the 0x749 collision mesh chunk.
+    TextV1SceneV2Collision,
+    /// NATSUUTA: text v2, window v2 (logical size, sixteen buttons), scene v3 with the
+    /// 0x749 collision chunk and button v2, within MEMORIA's object tables (eight texts,
+    /// four windows, no 0x6e0 or 0x8c8), 256 child slots and v1 draw animations.
+    TextV2WindowV2,
     TextV2,
     TextV3,
     /// Text v3, scene v4 with 1024 child slots (REALIVE and verified later builds).
@@ -33,13 +41,21 @@ pub enum SnapshotLayout {
 impl SnapshotLayout {
     pub(crate) fn text_version(self) -> u16 {
         match self {
-            Self::TextV1SceneV1 | Self::TextV1SceneV2 => 1,
-            Self::TextV2 => 2,
+            Self::TextV1SceneLegacy
+            | Self::TextV1SceneV1
+            | Self::TextV1SceneV2
+            | Self::TextV1SceneV2Collision => 1,
+            Self::TextV2WindowV2 | Self::TextV2 => 2,
             Self::TextV3 | Self::TextV3SceneV4 => 3,
         }
     }
+    /// Eight texts, four windows, no 0x6e0 or 0x8c8 records, v1 draw animations and
+    /// legacy sine modes: every text v1 layout and NATSUUTA.
+    pub(crate) fn old_tables(self) -> bool {
+        self.text_version() == 1 || self == Self::TextV2WindowV2
+    }
     pub(crate) fn child_slots(self) -> u16 {
-        if self.text_version() == 1 {
+        if self.old_tables() {
             256
         } else if self == Self::TextV3SceneV4 {
             1024

@@ -10,16 +10,43 @@ use crate::{
 use std::{collections::BTreeMap, error::Error};
 
 impl SceneHost {
+    /// Creators and restores only fill slots 0..3.
     pub(crate) fn has_effect_pools(&self) -> bool {
-        !self.rain_effects.is_empty()
-            || !self.particle_effects.is_empty()
-            || !self.falling_effects.is_empty()
-            || !self.collision_effects.is_empty()
-            || !self.fragment_effects.is_empty()
+        (0..4).any(|slot| self.has_effect_slot(slot))
     }
 
     pub(crate) fn saved_effect_pools(&self) -> Result<Vec<(u16, Vec<u8>)>, FormatError> {
+        self.saved_effect_pools_with_legacy(false)
+    }
+
+    pub(crate) fn saved_effect_pools_with_legacy(
+        &self,
+        legacy: bool,
+    ) -> Result<Vec<(u16, Vec<u8>)>, FormatError> {
+        if !legacy && !self.legacy_effects.is_empty() {
+            return Err(FormatError(
+                "snapshots of cmvs-20070119 legacy effect slots are not implemented",
+            ));
+        }
         let mut records = BTreeMap::new();
+        for (&slot, effect) in &self.legacy_effects {
+            use super::LegacyEffect;
+            let kind = match effect {
+                LegacyEffect::SnowField(_) => 0x50,
+                LegacyEffect::Walk(_) => 0x51,
+                LegacyEffect::Circle(_) => 0x52,
+                LegacyEffect::Curtain(_) => 0x53,
+                LegacyEffect::Magic(_) => 0x54,
+                LegacyEffect::Sprites(_) => 0x55,
+                LegacyEffect::FloatingPlanes(_) => 0x56,
+                LegacyEffect::Vortex(_) => 0x57,
+            };
+            if slot >= 4 {
+                return Err(FormatError("legacy effect slot exceeds 3"));
+            }
+            records.insert(u16::from(slot), vec![1, 0, kind, 0]);
+        }
+
         let mut insert = |slot: u8, template: Option<&SavedEffect>| -> Result<(), FormatError> {
             let template =
                 template.ok_or(FormatError("particle creation template is unavailable"))?;
@@ -32,6 +59,9 @@ impl SceneHost {
             }
             Ok(())
         };
+        for (&slot, effect) in &self.legacy_flakes {
+            insert(slot, Some(&effect.template))?;
+        }
         for (&slot, effect) in &self.rain_effects {
             insert(slot, Some(&effect.template))?;
         }
@@ -89,10 +119,29 @@ impl SceneHost {
                     ))?;
             }
             match &template {
-                SavedEffect::Rain { words, name } => {
+                SavedEffect::LegacyFlakes { words, name } => {
+                    scene.legacy_flakes.insert(
+                        slot as u8,
+                        super::LegacyFlakes::new(
+                            *words,
+                            SceneObject {
+                                image,
+                                ..Default::default()
+                            },
+                            *name,
+                            random,
+                        ),
+                    );
+                }
+                SavedEffect::Rain { words, name } | SavedEffect::LegacyRain { words, name } => {
+                    let construct = if matches!(template, SavedEffect::LegacyRain { .. }) {
+                        super::RainEffect::new_legacy
+                    } else {
+                        super::RainEffect::new
+                    };
                     scene.rain_effects.insert(
                         slot as u8,
-                        super::RainEffect::new(
+                        construct(
                             *words,
                             SceneObject {
                                 image,
@@ -103,12 +152,13 @@ impl SceneHost {
                     );
                 }
                 SavedEffect::Falling { words, .. } => {
-                    let mut effect = FallingEffect::new(
+                    let mut effect = FallingEffect::new_with_arithmetic(
                         words[..4].try_into().unwrap(),
                         words[4],
                         words[5] != 0,
                         image,
                         random,
+                        x87_arithmetic,
                     );
                     effect.template = Some(template);
                     scene.falling_effects.insert(slot as u8, effect);
@@ -128,8 +178,10 @@ impl SceneHost {
                     effect.template = Some(template);
                     scene.particle_effects.insert(slot as u8, effect);
                 }
-                SavedEffect::Collision { words, .. } => {
-                    let mut effect = CollisionEffect::new(
+                SavedEffect::Collision { words, .. }
+                | SavedEffect::FadingParticles { words, .. } => {
+                    // 0x425850 rebuilds type 7 through 0x432500, restarting its fade clock.
+                    let mut effect = CollisionEffect::new_with_arithmetic(
                         words[0],
                         words[1..3].try_into().unwrap(),
                         words[3],
@@ -138,7 +190,11 @@ impl SceneHost {
                             ..Default::default()
                         },
                         random,
+                        x87_arithmetic,
                     );
+                    if matches!(template, SavedEffect::FadingParticles { .. }) {
+                        effect.fade = Some(super::ParticleFade::new(words[0]));
+                    }
                     effect.template = Some(template);
                     scene.collision_effects.insert(slot as u8, effect);
                 }
@@ -152,6 +208,25 @@ impl SceneHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn puriring_effect_save_keeps_only_native_type_header_without_mutating_state() {
+        let mut scene = SceneHost::default();
+        let mut sprites = super::super::sprites::Sprites::new(Vec::new());
+        sprites.request(8).unwrap();
+        scene
+            .legacy_effects
+            .insert(2, super::super::LegacyEffect::Sprites(Box::new(sprites)));
+        assert!(scene.saved_effect_pools().is_err());
+        assert_eq!(
+            scene.saved_effect_pools_with_legacy(true).unwrap(),
+            vec![(2, vec![1, 0, 0x55, 0])]
+        );
+        let super::super::LegacyEffect::Sprites(sprites) = &scene.legacy_effects[&2] else {
+            panic!()
+        };
+        assert_eq!(sprites.requested, 8);
+    }
+
     #[derive(Default)]
     struct Images(Vec<Vec<u8>>);
     impl ImageSource for Images {
@@ -160,6 +235,36 @@ mod tests {
             Ok(Some(b"NONE".to_vec()))
         }
     }
+    #[test]
+    fn fading_pool_saves_type_seven_template_and_restarts_its_fade_on_restore() {
+        let f = f32::to_bits;
+        let template = SavedEffect::FadingParticles {
+            words: [0x0002_0a05, f(15.0), f(1000.0), 2],
+            name: SavedEffect::name_field(b"snow").unwrap(),
+        };
+        let bytes = template.encode().unwrap();
+        assert_eq!((&bytes[..4], bytes.len()), (&[1, 0, 7, 0][..], 52));
+        let mut random = CrtRandom::new(0);
+        let mut scene = SceneHost::load_effect_pools(
+            &[(1, &bytes)],
+            &mut Images::default(),
+            &mut random,
+            &mut 0,
+            true,
+        )
+        .unwrap();
+        let fade = scene.collision_effects[&1].fade.clone().unwrap();
+        assert_eq!((fade.phase, fade.elapsed, fade.alpha), (2, 0, 255));
+        scene
+            .advance_effect_pools(1250, &mut random, &crate::camera::CameraHost::default())
+            .unwrap();
+        assert_eq!(
+            scene.collision_effects[&1].fade.as_ref().unwrap().alpha,
+            128
+        );
+        assert_eq!(scene.saved_effect_pools().unwrap(), vec![(1, bytes)]);
+    }
+
     #[test]
     fn mixed_pools_reinitialize_in_slot_order_and_capture_only_the_creation_templates() {
         for x87 in [false, true] {

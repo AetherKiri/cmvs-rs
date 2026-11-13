@@ -2,8 +2,8 @@
 use crate::filesystem as fs;
 use crate::filesystem::File;
 use crate::{
-    FormatError, MAX_PAYLOAD, cursor::CursorBitmap, dispatch::Call, evaluate::error,
-    machine::Machine,
+    FormatError, MAX_PAYLOAD, TextEncoding, bytecode::DecodeError, cursor::CursorBitmap,
+    dispatch::Call, evaluate::error, machine::Machine,
 };
 use std::{
     error::Error,
@@ -104,7 +104,7 @@ pub struct TextDialogRequest {
     pub title: Vec<u8>,
     pub prompt: Vec<u8>,
     pub initial: Vec<u8>,
-    /// ANSI edit limit: 100 bytes allows 50 full-width Shift-JIS characters.
+    /// ANSI edit limit: 100 bytes allows 50 double-byte characters in the game encoding.
     pub max_bytes: u32,
 }
 pub enum TextDialogResult {
@@ -433,8 +433,6 @@ pub enum PlatformEvent {
     CursorUnchanged,
     Configured,
 }
-/// Separator 0x1400de070 between base title and scene title: Shift-JIS full-width space.
-const TITLE_SEPARATOR: [u8; 2] = [0x81, 0x40];
 
 #[derive(Default)]
 pub struct PlatformHost {
@@ -450,8 +448,42 @@ pub struct PlatformHost {
     others_display_use: bool,
     fullscreen_monitor_mode: u32,
     fullscreen_monitor_initialized: bool,
+    window_full_move: bool,
 }
 impl PlatformHost {
+    /// Legacy device +56: omit the centered origin in unscaled fullscreen mode.
+    pub fn window_full_move(&self) -> bool {
+        self.window_full_move
+    }
+    /// Called only for builds whose legacy display setting has been inspected.
+    pub fn configure_window_full_move(&mut self, ini: &[u8]) {
+        self.window_full_move =
+            crate::save_menu::profile_int(ini, "SYSTEM_INFO", "WINDOW_FULL_MOVE_USE", 0) != 0;
+    }
+    /// cmvs-20070119 0x43bae0: read/write boolean, always consumes two words.
+    pub(crate) fn handle_window_full_move(
+        &mut self,
+        call: &mut Call<'_, '_>,
+    ) -> Result<(), DecodeError> {
+        let mode = call.argument(4, "mode")?;
+        let value = if mode != 0 {
+            Some(call.argument(8, "value")? != 0)
+        } else {
+            call.ignore_argument(8, "unused value")?;
+            None
+        };
+        call.complete(0x4008)?;
+        if let Some(value) = value {
+            self.window_full_move = value;
+        } else {
+            call.vm
+                .state_mut()
+                .set_system_integer(0, u32::from(self.window_full_move))
+                .expect("slot 0 exists");
+        }
+        Ok(())
+    }
+
     pub fn fullscreen_monitor_mode(&self) -> u32 {
         self.fullscreen_monitor_mode
     }
@@ -472,12 +504,17 @@ impl PlatformHost {
     }
     /// The window title 0x140069fd0 sets after a load: +340, the separator and the saved
     /// +14336, as 0x2161 composes it.
-    pub(crate) fn restored_title(&self, title: &[u8]) -> Result<Vec<u8>, &'static str> {
+    pub(crate) fn restored_title(
+        &self,
+        title: &[u8],
+        encoding: TextEncoding,
+    ) -> Result<Vec<u8>, &'static str> {
         let mut text = self
             .title
             .clone()
             .ok_or("base window title +340 is unknown at load")?;
-        text.extend(TITLE_SEPARATOR);
+        // Host-generated text uses the same encoding as the script's title strings.
+        text.extend(encoding.title_separator());
         text.extend(title);
         if text.len() >= 128 {
             return Err("restored window title exceeds 127 bytes");
@@ -489,9 +526,10 @@ impl PlatformHost {
     pub(crate) fn restore_scene_title(
         &mut self,
         title: Vec<u8>,
+        encoding: TextEncoding,
         backend: &mut impl PlatformBackend,
     ) -> Result<(), Box<dyn Error>> {
-        let text = self.restored_title(&title)?;
+        let text = self.restored_title(&title, encoding)?;
         backend.apply(&PlatformRequest::Title(text))?;
         self.scene_title = title;
         Ok(())
@@ -740,7 +778,7 @@ impl PlatformHost {
                     .as_deref()
                     .ok_or_else(|| error(pc, 0x2161, "base window title +340 is unknown"))?;
                 let mut text = base.to_vec();
-                text.extend(TITLE_SEPARATOR);
+                text.extend(call.vm.text_encoding().title_separator());
                 text.extend(&name);
                 // The original composes into a 128-byte stack buffer without a bound check.
                 if text.len() >= 128 {
@@ -823,5 +861,35 @@ fn argument_names(command: u16) -> &'static [&'static str] {
         0x2c9 => &["aspect scaling"],
         0x2b0 => &["thumbnail width", "thumbnail height"],
         _ => unreachable!("registered platform arguments"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restored_scene_title_uses_game_encoding() {
+        for (encoding, separator) in [
+            (TextEncoding::ShiftJis, &[0x81, 0x40][..]),
+            (TextEncoding::Gbk, &[0xa1, 0xa1]),
+            (TextEncoding::Utf8, "\u{3000}".as_bytes()),
+        ] {
+            let mut host = PlatformHost {
+                title: Some(b"Game".to_vec()),
+                ..Default::default()
+            };
+            let mut backend = RecordingBackend::default();
+            host.restore_scene_title(b"- Opening -".to_vec(), encoding, &mut backend)
+                .unwrap();
+            let mut expected = b"Game".to_vec();
+            expected.extend(separator);
+            expected.extend(b"- Opening -");
+            assert_eq!(
+                backend.requests().last(),
+                Some(&PlatformRequest::Title(expected))
+            );
+            assert_eq!(host.scene_title(), b"- Opening -");
+        }
     }
 }

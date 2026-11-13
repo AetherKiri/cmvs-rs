@@ -26,6 +26,10 @@ int32_t cmvs_host_open(CmvsHost *, const char *game, const char *user,
 int32_t cmvs_host_open_game_savedata(CmvsHost *, const char *game,
                                     const char *legacy_user, const char *font,
                                     int32_t native_audio);
+/* After open, before the first tick: bypass verified startup auto-load flags.
+ * Games without a recorded auto-load policy are unchanged. Saves and explicit
+ * load operations remain available. Returns -1 if called after startup. */
+int32_t cmvs_host_skip_auto_resume(CmvsHost *);
 void cmvs_host_destroy(CmvsHost *);
 /* Tick: -1 error, 0 cooperative slice, 1 complete frame, 2 quit, 3 inactive. */
 int32_t cmvs_host_tick(CmvsHost *, uint32_t delta_ms);

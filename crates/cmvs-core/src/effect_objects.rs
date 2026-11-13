@@ -3,8 +3,16 @@ use crate::{bytecode::DecodeError, dispatch::Call, machine::Machine};
 mod collision;
 mod falling;
 mod fragments;
-pub use collision::{CollisionEffect, CollisionParticle};
+pub use collision::{CollisionEffect, CollisionParticle, ParticleFade};
 pub use fragments::{Fragment, FragmentEffect};
+mod curtain;
+mod legacy;
+mod magic;
+mod sprites;
+mod vortex;
+pub use legacy::{LegacyEffect, SnowField, Walk, WorldQuad};
+mod legacy_flakes;
+pub(crate) use legacy_flakes::LegacyFlakes;
 mod rain;
 pub(crate) use rain::RainEffect;
 mod particles;
@@ -14,26 +22,30 @@ pub use particles::{Particle, ParticleEffect};
 
 /// 0x22a0 / 0x14007dbe0: SP-4 slot 0..3 destroys and frees that object (0x140040820) when
 /// present; other values are ignored. Returns 0x4004 without a system result.
-/// VM-only compatibility helper for an empty object host. Stateful callers use dispatch.
+/// VM-only compatibility helper for an empty object host, which has no effect to
+/// destroy. Stateful callers use dispatch.
 pub fn try_handle(vm: &mut Machine<'_>) -> Result<bool, DecodeError> {
     let Some((pc, 0x2a0)) = vm.pending_system() else {
         return Ok(false);
     };
-    crate::scene::SceneHost::default().release_effect(&mut Call::new(vm, pc, 0x2a0))?;
+    let mut call = Call::new(vm, pc, 0x2a0);
+    call.argument(4, "slot")?;
+    call.complete(0x4004)?;
     Ok(true)
 }
 
 impl crate::scene::SceneHost {
-    pub(crate) fn release_effect(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+    /// 0x22a0 (0x43cab0 in cmvs-20070119): SP-4 slot 0..3, returns 0x4004.
+    pub(crate) fn release_effect(
+        &mut self,
+        call: &mut Call<'_, '_>,
+        backend: Option<&mut dyn crate::audio::AudioBackend>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let slot = call.argument(4, "slot")?;
-        call.complete(0x4004)?;
         if slot < 4 {
-            self.rain_effects.remove(&(slot as u8));
-            self.particle_effects.remove(&(slot as u8));
-            self.falling_effects.remove(&(slot as u8));
-            self.collision_effects.remove(&(slot as u8));
-            self.fragment_effects.remove(&(slot as u8));
+            self.replace_effect_slot(slot as u8, backend)?;
         }
+        call.complete(0x4004)?;
         Ok(())
     }
 }
@@ -46,7 +58,12 @@ impl crate::scene::SceneHost {
         random: &mut crate::random::CrtRandom,
         cameras: &crate::camera::CameraHost,
     ) -> Result<(), crate::FormatError> {
-        let triangles = if self.collision_effects.is_empty() {
+        // Type 7 shares the map but never reads the collision planes.
+        let triangles = if self
+            .collision_effects
+            .values()
+            .all(CollisionEffect::is_fading)
+        {
             Vec::new()
         } else {
             self.collision_triangles().map_err(crate::FormatError)?
@@ -54,6 +71,9 @@ impl crate::scene::SceneHost {
         let view = cameras.view(0).expect("view exists");
         let position = [view.words[0], view.words[1], view.words[2]].map(f32::from_bits);
         for slot in 0..4 {
+            if let Some(effect) = self.legacy_flakes.get_mut(&slot) {
+                effect.advance(delta);
+            }
             if let Some(effect) = self.rain_effects.get_mut(&slot) {
                 effect.advance(delta, random);
             }

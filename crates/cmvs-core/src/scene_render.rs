@@ -40,12 +40,21 @@ pub enum Layer<'a> {
         alpha: u32,
         blend: Blend,
     },
+    /// A logically scaled image with the original texture-space transition mask.
+    ProjectedMasked {
+        image: &'a ObjectImage,
+        rect: [i64; 4],
+        quad: [f32; 4],
+        alpha: u32,
+        mask: &'a MaskTransition,
+        blend: Blend,
+    },
     /// A rotated 2D image: device-space corners in strip order top-left, top-right,
     /// bottom-left, bottom-right of the source rectangle.
     Rotated {
         image: &'a ObjectImage,
-        /// Source x/y/width/height.
-        rect: [i64; 4],
+        /// Source x/y/width/height in texels; tessellated world cells may span fractions.
+        rect: [f32; 4],
         corners: [[f32; 2]; 4],
         alpha: u32,
         blend: Blend,
@@ -202,6 +211,7 @@ fn image_layer<'a>(
     alpha: i64,
     mask: Option<&'a MaskTransition>,
     inherited: Option<([f32; 2], [f32; 2])>,
+    screen_scale: f32,
 ) -> Result<Option<Layer<'a>>, FormatError> {
     let [sx, sy, w, h] = [2, 3, 4, 5].map(|i| i64::from(words[i] as i16));
     if w <= 0 || h <= 0 || alpha <= 0 {
@@ -230,20 +240,20 @@ fn image_layer<'a>(
             return Ok(None);
         }
         let origin = [words[6] as i16, words[7] as i16].map(i64::from);
-        let corners = rotated_corners(position, scale, origin, [w, h], degrees);
+        let corners = rotated_corners(position, scale, origin, [w, h], degrees, screen_scale);
         if !corners.as_flattened().iter().all(|v| v.is_finite()) {
             return Err(FormatError("rotated 2D image extent is not finite"));
         }
         return Ok(Some(Layer::Rotated {
             image,
-            rect: [sx, sy, w, h],
+            rect: [sx, sy, w, h].map(|v| v as f32),
             corners,
             alpha: alpha.min(255) as u32,
             blend: blend(words, image, alpha, false)?,
         }));
     }
-    if inherited.is_some() || scale != [1.0; 2] {
-        if mask.is_some() {
+    if inherited.is_some() || scale != [1.0; 2] || screen_scale != 1.0 {
+        if mask.is_some() && screen_scale == 1.0 {
             return Err(FormatError("scaled 2D mask rendering is not verified"));
         }
         let (position, scale) = inherited.unwrap_or((position.map(|v| v as f32), scale));
@@ -252,13 +262,24 @@ fn image_layer<'a>(
         }
         let origin = [words[6] as i16, words[7] as i16].map(f32::from);
         let quad = [
-            position[0] - origin[0] * scale[0] - 0.5,
-            position[1] - origin[1] * scale[1] - 0.5,
-            position[0] + (w as f32 - origin[0]) * scale[0] - 0.5,
-            position[1] + (h as f32 - origin[1]) * scale[1] - 0.5,
-        ];
+            position[0] - origin[0] * scale[0],
+            position[1] - origin[1] * scale[1],
+            position[0] + (w as f32 - origin[0]) * scale[0],
+            position[1] + (h as f32 - origin[1]) * scale[1],
+        ]
+        .map(|v| v * screen_scale - 0.5);
         if !quad.iter().all(|v| v.is_finite()) {
             return Err(FormatError("scaled 2D image extent is not finite"));
+        }
+        if let Some(mask) = mask {
+            return Ok(Some(Layer::ProjectedMasked {
+                image,
+                rect: [sx, sy, w, h],
+                quad,
+                alpha: alpha.min(255) as u32,
+                mask,
+                blend: blend(words, image, alpha, true)?,
+            }));
         }
         return Ok(Some(Layer::Projected {
             image,
@@ -300,9 +321,14 @@ fn rotated_corners(
     origin: [i64; 2],
     size: [i64; 2],
     degrees: f32,
+    screen_scale: f32,
 ) -> [[f32; 2]; 4] {
-    rotated_local(scale, origin, size, degrees)
-        .map(|[x, y]| [x + position[0] - 0.5, y + position[1] - 0.5])
+    rotated_local(scale, origin, size, degrees).map(|[x, y]| {
+        [
+            (x + position[0]) * screen_scale - 0.5,
+            (y + position[1]) * screen_scale - 0.5,
+        ]
+    })
 }
 
 /// Local corners top-left, top-right, bottom-left, bottom-right: the scaled offsets from
@@ -361,6 +387,7 @@ fn solid_layer<'a>(
     words: &[u32; 22],
     position: [i64; 2],
     alpha: i64,
+    screen_scale: f32,
 ) -> Result<Option<Layer<'a>>, FormatError> {
     let [w, h] = [4, 5].map(|i| i64::from(words[i] as i16));
     if w <= 0 || h <= 0 || alpha <= 0 {
@@ -378,12 +405,18 @@ fn solid_layer<'a>(
     }
     let [b, g, r, _] = words[14].to_le_bytes();
     Ok(Some(Layer::Solid {
-        rect: [
-            position[0] - i64::from(words[6] as i16),
-            position[1] - i64::from(words[7] as i16),
-            w,
-            h,
-        ],
+        // Solid layers store covered pixel bounds. Match the native float vertex
+        // multiply followed by -0.5 before taking the integer pixel-center span.
+        rect: {
+            let [x, y] = [0, 1].map(|i| position[i] - i64::from(words[6 + i] as i16));
+            if screen_scale == 1.0 {
+                [x, y, w, h]
+            } else {
+                let [l, t, r, b] =
+                    [x, y, x + w, y + h].map(|v| (v as f32 * screen_scale - 0.5).ceil() as i64);
+                [l, t, r - l, b - t]
+            }
+        },
         color: [r, g, b],
         alpha: alpha.min(255) as u32,
         blend: if alpha >= 255 {
@@ -404,6 +437,7 @@ fn child_layer<'a>(
     parent_words: &[u32; 22],
     child: &'a SceneObject,
     words: &[u32; 22],
+    screen_scale: f32,
 ) -> Result<Option<Layer<'a>>, FormatError> {
     let image = child.image.as_ref().or_else(|| {
         parent
@@ -448,22 +482,51 @@ fn child_layer<'a>(
         None
     };
     match image {
-        Some(image) => image_layer(image, words, position, alpha, None, inherited),
+        Some(image) => image_layer(image, words, position, alpha, None, inherited, screen_scale),
         None if inherited.is_some() && words[4] as i16 > 0 && words[5] as i16 > 0 => {
             Err(FormatError("scaled solid child rendering is not verified"))
         }
-        None => solid_layer(words, position, alpha),
+        None => solid_layer(words, position, alpha, screen_scale),
     }
 }
 
-/// 0x14003b350 scales drawing by the device width (+24) over the logical width (+6256), or
-/// over the screen width (+8) while that is zero. Rendering uses the configured logical
-/// canvas; another per-object logical width would change the factor and remains rejected.
-fn unit_screen_scale(object: &SceneObject, screen: [u32; 2]) -> Result<(), FormatError> {
-    match object.logical_size[0] {
-        0 => Ok(()),
-        width if width == screen[0] => Ok(()),
-        _ => Err(FormatError("logical screen scaling is not modeled")),
+/// HASSAKU 0x140033d40 walks the parent chain while inheritance bit 0 is set,
+/// then divides the device width by that ancestor's logical width (zero = canvas).
+/// Its vertex builders apply this one factor to both axes, before the -0.5 offset.
+fn logical_screen_scale(
+    scene: &SceneHost,
+    object: &SceneObject,
+    parent_scale: Option<f32>,
+) -> Result<f32, FormatError> {
+    if !scene.allow_logical_screen_scale {
+        return match object.logical_size[0] {
+            0 => Ok(1.0),
+            width if width == scene.screen_size()[0] => Ok(1.0),
+            _ => Err(FormatError("logical screen scaling is not modeled")),
+        };
+    }
+    let factor = if object.flags & 1 != 0
+        && let Some(factor) = parent_scale
+    {
+        factor
+    } else {
+        let width = object.logical_size[0];
+        if width == 0 {
+            1.0
+        } else {
+            scene.screen_size()[0] as f32 / width as f32
+        }
+    };
+    Ok(factor)
+}
+
+fn require_unit_projection_scale(factor: f32) -> Result<(), FormatError> {
+    if factor == 1.0 {
+        Ok(())
+    } else {
+        Err(FormatError(
+            "logical screen scaling of camera projections is not modeled",
+        ))
     }
 }
 
@@ -650,7 +713,7 @@ fn projected_layer<'a>(
             key,
             Layer::Rotated {
                 image,
-                rect: [sx, sy, w, h],
+                rect: [sx, sy, w, h].map(|v| v as f32),
                 corners,
                 alpha: alpha.min(255) as u32,
                 blend,
@@ -717,6 +780,24 @@ fn shifted(layer: Layer<'_>, by: [i64; 2]) -> Layer<'_> {
                 rect,
                 quad: [quad[0] + x, quad[1] + y, quad[2] + x, quad[3] + y],
                 alpha,
+                blend,
+            }
+        }
+        Layer::ProjectedMasked {
+            image,
+            rect,
+            quad,
+            alpha,
+            mask,
+            blend,
+        } => {
+            let [x, y] = by.map(|v| v as f32);
+            Layer::ProjectedMasked {
+                image,
+                rect,
+                quad: [quad[0] + x, quad[1] + y, quad[2] + x, quad[3] + y],
+                alpha,
+                mask,
                 blend,
             }
         }
@@ -887,6 +968,18 @@ pub fn prepare_scene<'a>(
             )
             .chain(
                 scene
+                    .legacy_flakes
+                    .get(&slot)
+                    .into_iter()
+                    .flat_map(|effect| {
+                        effect
+                            .particles
+                            .iter()
+                            .map(|p| (None, &p.object, Some(&effect.pool)))
+                    }),
+            )
+            .chain(
+                scene
                     .rain_effects
                     .get(&slot)
                     .into_iter()
@@ -898,25 +991,64 @@ pub fn prepare_scene<'a>(
                     }),
             )
     });
+    let sprites = scene
+        .legacy_effects()
+        .values()
+        .flat_map(|effect| match effect {
+            crate::effect_objects::LegacyEffect::Sprites(sprites) => sprites.objects.as_slice(),
+            crate::effect_objects::LegacyEffect::Curtain(curtain) => {
+                std::slice::from_ref(&curtain.background)
+            }
+            _ => &[],
+        });
     let all_objects = slots
         .map(|(slot, object)| (slot, object, None, false))
         .chain(particles.map(|(slot, object, parent)| (slot, object, parent, false)))
+        .chain(sprites.map(|object| (None, object, None, false)))
         .chain(additional.iter().map(|&object| (None, object, None, true)));
-    for (slot, object, parent, additional_object) in all_objects {
-        if object.shown
-            && let Some(change) = &object.change
-        {
-            objects.push((None, change.common.as_ref(), additional_object, None));
-            objects.push((None, change.previous.as_ref(), additional_object, None));
+    type QueuedObject<'a> = (Option<u8>, &'a SceneObject, bool, Option<&'a SceneObject>);
+    fn collect<'a>(
+        out: &mut Vec<QueuedObject<'a>>,
+        slot: Option<u8>,
+        object: &'a SceneObject,
+        additional: bool,
+        parent: Option<&'a SceneObject>,
+    ) -> Result<(), FormatError> {
+        if !object.shown {
+            return Ok(());
         }
-        objects.push((slot, object, additional_object, parent));
+        if let Some(effect) = object.special_effect.as_ref().filter(|e| e.words[0] != 0) {
+            effect.validate_live(
+                object
+                    .draw
+                    .as_ref()
+                    .ok_or(FormatError("object effect has no draw state"))?,
+            )?;
+            // Active effects queue only their independent list (0x14003de80).
+            for child in &effect.children {
+                collect(out, None, child, additional, Some(object))?;
+            }
+        } else {
+            if let Some(change) = &object.change {
+                collect(out, None, &change.common, additional, None)?;
+                collect(out, None, &change.previous, additional, None)?;
+            }
+            out.push((slot, object, additional, parent));
+        }
+        Ok(())
+    }
+    for (slot, object, parent, additional_object) in all_objects {
+        collect(&mut objects, slot, object, additional_object, parent)?;
     }
     for (slot, object, additional_object, parent) in objects {
         // 0x14003de80 returns early for +6244 == 0; no draw state means +6240 == 0.
         let Some(draw) = object.draw.as_ref().filter(|_| object.shown) else {
             continue;
         };
-        unit_screen_scale(object, scene.screen_size())?;
+        let parent_scale = parent
+            .map(|p| logical_screen_scale(scene, p, None))
+            .transpose()?;
+        let screen_scale = logical_screen_scale(scene, object, parent_scale)?;
         if object.secondary_image.is_some() && matches!(draw.words[0], 2 | 3) {
             return Err(FormatError(
                 "projected second texture rendering is not verified",
@@ -934,6 +1066,7 @@ pub fn prepare_scene<'a>(
         };
         match d[0] {
             2 | 3 => {
+                require_unit_projection_scale(screen_scale)?;
                 let cameras =
                     cameras.ok_or(FormatError("camera projection needs the camera state"))?;
                 let camera = cameras.camera((d[0] - 2) as usize).expect("camera exists");
@@ -962,7 +1095,11 @@ pub fn prepare_scene<'a>(
                                 "nested projected children or child image replacement is not verified",
                             ));
                         }
-                        unit_screen_scale(child, scene.screen_size())?;
+                        require_unit_projection_scale(logical_screen_scale(
+                            scene,
+                            child,
+                            Some(screen_scale),
+                        )?)?;
                         // Bound this implementation to the observed inherited, attached image path.
                         if child.flags & 3 != 3 {
                             return Err(FormatError(
@@ -1007,11 +1144,13 @@ pub fn prepare_scene<'a>(
                 i64::from((d[17].wrapping_mul(d[21]) as i32) >> 8),
                 mask,
                 None,
+                screen_scale,
             )?,
             None => solid_layer(
                 d,
                 position,
                 i64::from((d[17].wrapping_mul(d[21]) as i32) >> 8),
+                screen_scale,
             )?,
         }
         .map(|layer| texture_operation(layer, draw.texture_subtract != 0))
@@ -1040,9 +1179,9 @@ pub fn prepare_scene<'a>(
                 if words[0] != d[0] || order(words) < 0.0 {
                     continue;
                 }
-                unit_screen_scale(child, scene.screen_size())?;
+                let child_scale = logical_screen_scale(scene, child, Some(screen_scale))?;
                 check_screen(words, scene.allow_screen_coordinates_one)?;
-                let Some(layer) = child_layer(object, d, child, words)? else {
+                let Some(layer) = child_layer(object, d, child, words, child_scale)? else {
                     continue;
                 };
                 let layer = texture_operation(
@@ -1100,18 +1239,29 @@ pub fn prepare_scene<'a>(
     }
     // The engine enqueues the fade after ordinary object slots (0x140015da0).
     if let Some(fade) = scene.fade().current() {
-        // The overlay is a layer 0 queue item; its translated extent is not verified.
-        if scene
-            .quake()
-            .is_some_and(|quake| quake.offset(false) != [0, 0])
-        {
-            return Err(FormatError(
-                "fade overlay under a quake offset is not verified",
-            ));
-        }
+        // PURIRING 0x42ab20 creates a screen-sized solid at (0,0), with the
+        // constructor's quake flag set. 0x407b10 enqueues it as a slot object;
+        // 0x407c90 / 0x42bb90 apply that queue's offset without expanding it.
+        let [x, y] = scene.quake().map_or([0, 0], |quake| quake.offset(false));
+        let layer = if [x, y] == [0, 0] {
+            Layer::Fade(fade)
+        } else {
+            let [b, g, r, _] = fade.color.to_le_bytes();
+            Layer::Solid {
+                rect: [
+                    i64::from(x),
+                    i64::from(y),
+                    i64::from(width),
+                    i64::from(height),
+                ],
+                color: [r, g, b],
+                alpha: fade.opacity.clamp(0, 255) as u32,
+                blend: Blend::Alpha,
+            }
+        };
         entries.push(Entry {
             order: fade.order as f32,
-            layer: Some(Layer::Fade(fade)),
+            layer: Some(layer),
             children: Vec::new(),
         });
     }
@@ -1122,6 +1272,39 @@ pub fn prepare_scene<'a>(
         queue.sort_by(|a, b| b.order.total_cmp(&a.order));
     }
     let mut world = Vec::new();
+    // cmvs-20070119 legacy effect meshes: queue 1 (no blending) then queue 5, each from the
+    // farthest object (0x407c90 / 0x417290 insert by descending view distance).
+    let mut opaque = Vec::new();
+    if !scene.legacy_effects().is_empty() {
+        let cameras = cameras.ok_or(FormatError("legacy effect meshes need the device view"))?;
+        let view = cameras.view(0).expect("view exists");
+        let projection = view.projection([width, height]).map_err(FormatError)?;
+        let eye = [view.words[0], view.words[1], view.words[2]].map(f32::from_bits);
+        for effect in scene.legacy_effects().values() {
+            for quad in effect.quads() {
+                let distance = quad
+                    .position
+                    .iter()
+                    .zip(eye)
+                    .map(|(p, e)| (p - e) * (p - e))
+                    .sum::<f32>()
+                    .sqrt();
+                let mut layers = Vec::new();
+                tessellate_world_quad(&quad, &projection, &mut layers);
+                let entry = Entry {
+                    order: distance,
+                    layer: None,
+                    children: layers.into_iter().map(|layer| (0.0, layer)).collect(),
+                };
+                if !quad.late {
+                    opaque.push(entry);
+                } else {
+                    world.push(entry);
+                }
+            }
+        }
+    }
+    opaque.sort_by(|a, b| b.order.total_cmp(&a.order));
     for effect in scene.falling_effects().values() {
         let Some(image) = &effect.image else { continue };
         let view = cameras
@@ -1155,9 +1338,60 @@ pub fn prepare_scene<'a>(
             });
         }
     }
+    for effect in scene.legacy_effects().values() {
+        let crate::effect_objects::LegacyEffect::Magic(magic) = effect else {
+            continue;
+        };
+        let view = cameras
+            .ok_or(FormatError("magic sparks need the device view"))?
+            .view(0)
+            .expect("view exists");
+        let eye = [view.words[0], view.words[1], view.words[2]].map(f32::from_bits);
+        for spark in &magic.sparks {
+            if spark.alpha == 0 {
+                continue;
+            }
+            let position = spark.xyz.map(f32::from_bits);
+            let Some(quad) = view
+                .billboard(position, [0.1, 0.1], [width, height])
+                .map_err(FormatError)?
+            else {
+                continue;
+            };
+            let distance = position
+                .iter()
+                .zip(eye)
+                .map(|(p, e)| (p - e) * (p - e))
+                .sum::<f32>()
+                .sqrt();
+            let image = &magic.spark_image;
+            world.push(Entry {
+                order: distance,
+                layer: Some(Layer::Projected {
+                    image,
+                    rect: [
+                        0,
+                        0,
+                        i64::from(image.pixels.width()),
+                        i64::from(image.pixels.height()),
+                    ],
+                    quad,
+                    alpha: spark.alpha,
+                    blend: Blend::Additive,
+                }),
+                children: Vec::new(),
+            });
+        }
+    }
     world.sort_by(|a, b| b.order.total_cmp(&a.order));
     let mut commands = Vec::new();
-    for mut entry in projected.into_iter().flatten().chain(world).chain(entries) {
+    for mut entry in projected
+        .into_iter()
+        .flatten()
+        .chain(opaque)
+        .chain(world)
+        .chain(entries)
+    {
         entry.children.sort_by(|a, b| b.0.total_cmp(&a.0));
         let layers = entry
             .layer
@@ -1207,8 +1441,9 @@ fn draw_projected<const WRAP: bool>(
     [sx, sy, w, h]: [i64; 4],
     [left, top, right, bottom]: [f32; 4],
     opacity: u32,
-    blend: Blend,
+    shading: (Blend, Option<&MaskTransition>),
 ) {
+    let (blend, mask) = shading;
     let step = [w as f32 / (right - left), h as f32 / (bottom - top)];
     let span = |from: f32, to: f32, limit: u32| {
         let limit = limit as f32;
@@ -1224,7 +1459,16 @@ fn draw_projected<const WRAP: bool>(
         for x in x0..x1 {
             let tx = sx as f32 + (x as f32 - left) * step[0] - 0.5;
             let texel = bilinear_address::<WRAP>(image, tx, ty);
-            let alpha = (u32::from(texel[3]) * opacity + 127) / 255;
+            let mut alpha = (u32::from(texel[3]) * opacity + 127) / 255;
+            if let Some(mask) = mask {
+                // The shared mask shader uses point sampling at floor(source UV).
+                let mw = i64::from(mask.mask.pixels.width());
+                let mh = i64::from(mask.mask.pixels.height());
+                let mx = ((tx + 0.5).floor() as i64).clamp(0, mw - 1);
+                let my = ((ty + 0.5).floor() as i64).clamp(0, mh - 1);
+                let green = mask.mask.pixels.pixels()[((my * mw + mx) * 4 + 1) as usize];
+                alpha = (alpha as f32 * mask.coverage(green)).round() as u32;
+            }
             let dst = ((y * i64::from(width) + x) * 4) as usize;
             put(
                 &mut pixels[dst..dst + 3],
@@ -1271,12 +1515,12 @@ fn draw_rotated(
     pixels: &mut [u8],
     [width, height]: [u32; 2],
     image: &ObjectImage,
-    [sx, sy, w, h]: [i64; 4],
+    [sx, sy, w, h]: [f32; 4],
     corners: [[f32; 2]; 4],
     opacity: u32,
     blend: Blend,
 ) {
-    let [u0, v0, u1, v1] = [sx, sy, sx + w, sy + h].map(|v| v as f64);
+    let [u0, v0, u1, v1] = [sx, sy, sx + w, sy + h].map(f64::from);
     let texture = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
     let point = corners.map(|[x, y]| [f64::from(x), f64::from(y)]);
     for triangle in [[0, 1, 2], [1, 3, 2]] {
@@ -1336,6 +1580,96 @@ fn draw_rotated(
             }
         }
     }
+}
+
+/// A world-space quad of the old 3D queues as device-space `Rotated` cells. The device
+/// interpolates texture coordinates perspective-correctly and clips at the near plane; here
+/// the quad is subdivided in world space until each cell is small on screen and shallow in
+/// depth, so affine cells stay within a fraction of a pixel. Cells crossing the near plane
+/// are subdivided further and dropped at the depth limit; cells beyond the far plane are
+/// dropped. Cells keep fractional texel sub-rectangles, so magnified textures split into
+/// cells smaller than a texel stay covered; they sample with clamped addressing, whereas
+/// the device's 3D stage wraps.
+fn tessellate_world_quad<'a>(
+    quad: &crate::effect_objects::WorldQuad<'a>,
+    projection: &crate::camera::ViewProjection,
+    out: &mut Vec<Layer<'a>>,
+) {
+    use crate::camera::ViewProjection;
+    let size = [quad.image.pixels.width(), quad.image.pixels.height()].map(|v| v as f32);
+    let lerp = |a: [f32; 3], b: [f32; 3], t: f32| std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
+    let world = |u: f32, v: f32| {
+        let [tl, tr, bl, br] = quad.corners;
+        lerp(lerp(tl, tr, u), lerp(bl, br, u), v)
+    };
+    #[allow(clippy::too_many_arguments)]
+    fn cell<'a>(
+        quad: &crate::effect_objects::WorldQuad<'a>,
+        projection: &ViewProjection,
+        world: &dyn Fn(f32, f32) -> [f32; 3],
+        size: [f32; 2],
+        [u0, v0, u1, v1]: [f32; 4],
+        depth: u32,
+        out: &mut Vec<Layer<'a>>,
+    ) {
+        let corners = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
+        let view = corners.map(|[u, v]| projection.view(world(u, v)));
+        // Offscreen cells near the eye can project to enormous rectangles. Splitting
+        // those invisible cells to the depth limit creates hundreds of thousands of
+        // draws; homogeneous side-plane rejection preserves every visible cell.
+        if projection.outside_sides(&view) {
+            return;
+        }
+        let near = view.iter().filter(|p| p[2] < ViewProjection::NEAR).count();
+        if view.iter().all(|p| p[2] >= ViewProjection::FAR) || near == 4 && depth > 2 {
+            return;
+        }
+        let screen = view.map(|p| projection.screen(p));
+        let extent = screen
+            .iter()
+            .flat_map(|a| {
+                screen
+                    .iter()
+                    .map(move |b| (a[0] - b[0]).abs().max((a[1] - b[1]).abs()))
+            })
+            .fold(0.0f32, f32::max);
+        let zs = view.map(|p| p[2]);
+        let (low, high) = zs
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), &z| {
+                (l.min(z), h.max(z))
+            });
+        let fine = near == 0 && extent <= 48.0 && high <= low * 1.08;
+        if !fine && depth < 9 {
+            let (um, vm) = ((u0 + u1) * 0.5, (v0 + v1) * 0.5);
+            for rect in [
+                [u0, v0, um, vm],
+                [um, v0, u1, vm],
+                [u0, vm, um, v1],
+                [um, vm, u1, v1],
+            ] {
+                cell(quad, projection, world, size, rect, depth + 1, out);
+            }
+            return;
+        }
+        if near != 0 || !screen.iter().flatten().all(|v| v.is_finite()) {
+            return;
+        }
+        let [left, top, right, bottom] = quad.uv;
+        let [x0, x1] = [u0, u1].map(|u| (left + u * (right - left)) * size[0]);
+        let [y0, y1] = [v0, v1].map(|v| (top + v * (bottom - top)) * size[1]);
+        if ![x0, x1, y0, y1].iter().all(|v| v.is_finite()) {
+            return;
+        }
+        out.push(Layer::Rotated {
+            image: quad.image,
+            rect: [x0, y0, x1 - x0, y1 - y0],
+            corners: screen,
+            alpha: quad.alpha,
+            blend: quad.blend,
+        });
+    }
+    cell(quad, projection, &world, size, [0.0, 0.0, 1.0, 1.0], 0, out);
 }
 
 /// 0x140020340 mode 4 maps the second texture over the device viewport.
@@ -1399,7 +1733,7 @@ fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
                 ],
                 quad,
                 alpha,
-                Blend::Alpha,
+                (Blend::Alpha, None),
             );
             return;
         }
@@ -1419,7 +1753,34 @@ fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
             alpha,
             blend,
         } => {
-            draw_projected::<false>(pixels, [width, height], image, rect, quad, alpha, blend);
+            draw_projected::<false>(
+                pixels,
+                [width, height],
+                image,
+                rect,
+                quad,
+                alpha,
+                (blend, None),
+            );
+            return;
+        }
+        Layer::ProjectedMasked {
+            image,
+            rect,
+            quad,
+            alpha,
+            mask,
+            blend,
+        } => {
+            draw_projected::<false>(
+                pixels,
+                [width, height],
+                image,
+                rect,
+                quad,
+                alpha,
+                (blend, Some(mask)),
+            );
             return;
         }
         Layer::Rotated {
@@ -1458,6 +1819,54 @@ fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
             return;
         }
     };
+    if mask.is_none() && screen_mask.is_none() && matches!(blend, Blend::Replace | Blend::Alpha) {
+        let (x0, x1) = (left.max(0), (left + w).min(i64::from(width)));
+        let (y0, y1) = (top.max(0), (top + h).min(i64::from(height)));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let source_x = sx + x0 - left;
+        let source_y = sy + y0 - top;
+        let columns = (x1 - x0) as usize;
+        let source_width = i64::from(image.pixels.width());
+        if source_x >= 0
+            && source_x + x1 - x0 <= source_width
+            && source_y >= 0
+            && source_y + y1 - y0 <= i64::from(image.pixels.height())
+        {
+            // Contiguous, unscaled rows need no per-pixel coordinate clamp. Keep
+            // destination alpha, and bypass blending only for RGB replacement.
+            let replace =
+                matches!(blend, Blend::Replace) || (opacity == 255 && image.pixels.is_opaque());
+            for y in y0..y1 {
+                let source_at = ((source_y + y - y0) * source_width + source_x) as usize * 4;
+                let target_at = (y * i64::from(width) + x0) as usize * 4;
+                let source = &image.pixels.pixels()[source_at..source_at + columns * 4];
+                let target = &mut pixels[target_at..target_at + columns * 4];
+                let pairs = target
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(source.as_chunks::<4>().0);
+                if replace {
+                    for (target, source) in pairs {
+                        target[..3].copy_from_slice(&source[..3]);
+                    }
+                } else {
+                    for (target, source) in pairs {
+                        let alpha = (u32::from(source[3]) * opacity + 127) / 255;
+                        put(
+                            &mut target[..3],
+                            [source[0], source[1], source[2]],
+                            alpha,
+                            Blend::Alpha,
+                        );
+                    }
+                }
+            }
+            return;
+        }
+    }
     // Shader factor per mask green byte; the float result is rounded into the 8-bit alpha,
     // so pixels approximate rather than match the device's blending.
     let shade = mask.map(|mask| {
@@ -1490,6 +1899,162 @@ fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
 
 #[cfg(test)]
 mod scale_tests {
+    #[test]
+    fn oversized_world_mesh_culls_invisible_cells_and_preserves_visible_pixels() {
+        let image = ObjectImage {
+            name: Vec::new(),
+            filter: None,
+            alpha: false,
+            surface: false,
+            pixels: RgbaImage::new(512, 512, vec![255; 512 * 512 * 4]).unwrap(),
+        };
+        let camera = crate::camera::CameraHost::default();
+        let mut view = camera.view(0).unwrap().clone();
+        view.words = [0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 90.0].map(f32::to_bits);
+        let projection = view.projection([64, 64]).unwrap();
+        let mut quad = crate::effect_objects::WorldQuad {
+            image: &image,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            corners: [
+                [-20.0, 20.0, 1.0],
+                [20.0, 20.0, 1.0],
+                [-20.0, -20.0, 1.0],
+                [20.0, -20.0, 1.0],
+            ],
+            position: [0.0; 3],
+            alpha: 255,
+            blend: Blend::Replace,
+            late: false,
+        };
+        let mut layers = Vec::new();
+        tessellate_world_quad(&quad, &projection, &mut layers);
+        assert!(!layers.is_empty() && layers.len() < 100);
+        let frame = RenderFrame {
+            width: 64,
+            height: 64,
+            clear: [0, 0, 0, 255],
+            commands: layers,
+        };
+        assert!(
+            frame
+                .render_cpu()
+                .unwrap()
+                .pixels()
+                .iter()
+                .all(|&v| v == 255)
+        );
+        for corner in &mut quad.corners {
+            corner[0] += 50.0;
+        }
+        let mut layers = Vec::new();
+        tessellate_world_quad(&quad, &projection, &mut layers);
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn world_mesh_uses_the_selected_atlas_tile_after_tessellation() {
+        let mut pixels = [255, 0, 0, 255].repeat(64 * 64);
+        for y in 16..32 {
+            for x in 32..48 {
+                pixels[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4].copy_from_slice(&[0, 255, 0, 255]);
+            }
+        }
+        let image = ObjectImage {
+            name: Vec::new(),
+            filter: None,
+            alpha: false,
+            surface: false,
+            pixels: RgbaImage::new(64, 64, pixels).unwrap(),
+        };
+        let camera = crate::camera::CameraHost::default();
+        let mut view = camera.view(0).unwrap().clone();
+        view.words = [0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 90.0].map(f32::to_bits);
+        let quad = crate::effect_objects::WorldQuad {
+            image: &image,
+            uv: [0.5, 0.25, 0.75, 0.5],
+            corners: [
+                [-1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+            ],
+            position: [0.0, 0.0, 1.0],
+            alpha: 255,
+            blend: Blend::Replace,
+            late: false,
+        };
+        let mut layers = Vec::new();
+        tessellate_world_quad(&quad, &view.projection([64, 64]).unwrap(), &mut layers);
+        assert!(layers.len() > 1);
+        for layer in &layers {
+            let Layer::Rotated {
+                rect: [x, y, w, h], ..
+            } = layer
+            else {
+                panic!("wrong layer");
+            };
+            assert!(*x >= 32.0 && x + w <= 48.0 && *y >= 16.0 && y + h <= 32.0);
+        }
+        let frame = RenderFrame {
+            width: 64,
+            height: 64,
+            clear: [0, 0, 0, 255],
+            commands: layers,
+        };
+        let pixels = frame.render_cpu().unwrap();
+        assert_eq!(
+            &pixels.pixels()[(32 * 64 + 32) * 4..(32 * 64 + 32) * 4 + 4],
+            &[0, 255, 0, 255]
+        );
+    }
+
+    #[test]
+    fn world_mesh_cells_smaller_than_a_texel_stay_covered() {
+        let image = ObjectImage {
+            name: Vec::new(),
+            filter: None,
+            alpha: false,
+            surface: false,
+            pixels: RgbaImage::new(1, 1, vec![0, 255, 0, 255]).unwrap(),
+        };
+        let camera = crate::camera::CameraHost::default();
+        let mut view = camera.view(0).unwrap().clone();
+        view.words = [0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 90.0].map(f32::to_bits);
+        let quad = crate::effect_objects::WorldQuad {
+            image: &image,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            corners: [
+                [-1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+            ],
+            position: [0.0, 0.0, 1.0],
+            alpha: 255,
+            blend: Blend::Replace,
+            late: false,
+        };
+        let mut layers = Vec::new();
+        tessellate_world_quad(&quad, &view.projection([64, 64]).unwrap(), &mut layers);
+        // The 64-pixel quad splits into cells of half a texel or less.
+        assert!(layers.len() >= 4);
+        let frame = RenderFrame {
+            width: 64,
+            height: 64,
+            clear: [0, 0, 0, 255],
+            commands: layers,
+        };
+        let pixels = frame.render_cpu().unwrap();
+        let green = pixels
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| **p == [0, 255, 0, 255])
+            .count();
+        assert_eq!(green, 64 * 64);
+    }
+
     #[test]
     fn world_billboard_sampling_wraps_both_texture_edges() {
         let image = crate::scene::ObjectImage {
@@ -1525,6 +2090,96 @@ mod scale_tests {
     }
 
     use super::*;
+
+    #[test]
+    fn unscaled_replacement_rows_preserve_alpha_clipping_and_blend_rules() {
+        let size = [5, 3];
+        for opaque in [false, true] {
+            let source: Vec<_> = (0..6 * 4)
+                .flat_map(|i| [i * 7, 255 - i * 3, i * 11, if opaque { 255 } else { i * 9 }])
+                .collect();
+            let image = ObjectImage {
+                name: Vec::new(),
+                filter: None,
+                alpha: true,
+                surface: false,
+                pixels: RgbaImage::new(6, 4, source).unwrap(),
+            };
+            for (rect, corner) in [
+                ([0, 0, 6, 4], [0, 0]),
+                ([1, 1, 4, 2], [1, 1]),
+                ([0, 0, 6, 4], [-2, -1]),
+                ([-1, -1, 8, 6], [-1, -1]),
+                ([8, 7, 2, 2], [0, 0]),
+                ([0, 0, 6, 4], [10, 0]),
+            ] {
+                for blend in [
+                    Blend::Replace,
+                    Blend::Alpha,
+                    Blend::Additive,
+                    Blend::BlackReplace,
+                    Blend::BlackAlpha,
+                    Blend::BlackAdditive,
+                ] {
+                    for opacity in [0, 127, 255] {
+                        let mut expected: Vec<_> = (0..size[0] * size[1])
+                            .flat_map(|i| [30, 50, 70, i as u8 * 13])
+                            .collect();
+                        let mut actual = expected.clone();
+                        let [sx, sy, w, h] = rect;
+                        let [left, top] = corner;
+                        for y in top.max(0)..(top + h).min(i64::from(size[1])) {
+                            for x in left.max(0)..(left + w).min(i64::from(size[0])) {
+                                let source_x = (sx + x - left).clamp(0, 5);
+                                let source_y = (sy + y - top).clamp(0, 3);
+                                let at = (source_y * 6 + source_x) as usize * 4;
+                                let pixel = &image.pixels.pixels()[at..at + 4];
+                                let alpha = (u32::from(pixel[3]) * opacity + 127) / 255;
+                                let dst = (y * i64::from(size[0]) + x) as usize * 4;
+                                for c in 0..3 {
+                                    let s = if matches!(
+                                        blend,
+                                        Blend::BlackReplace
+                                            | Blend::BlackAlpha
+                                            | Blend::BlackAdditive
+                                    ) {
+                                        0
+                                    } else {
+                                        u32::from(pixel[c])
+                                    };
+                                    let t = u32::from(expected[dst + c]);
+                                    expected[dst + c] = match blend {
+                                        Blend::Replace | Blend::BlackReplace => s as u8,
+                                        Blend::Alpha | Blend::BlackAlpha => {
+                                            ((s * alpha + t * (255 - alpha) + 127) / 255) as u8
+                                        }
+                                        Blend::Additive | Blend::BlackAdditive => {
+                                            (t + (s * alpha + 127) / 255).min(255) as u8
+                                        }
+                                    };
+                                }
+                            }
+                        }
+                        draw(
+                            &mut actual,
+                            size[0],
+                            size[1],
+                            Layer::Image {
+                                image: &image,
+                                rect,
+                                corner,
+                                alpha: opacity,
+                                mask: None,
+                                screen_mask: None,
+                                blend,
+                            },
+                        );
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn source_rectangles_keep_their_extent_and_clamp_texels_on_every_edge() {
@@ -1597,7 +2252,7 @@ mod scale_tests {
         for (scale, rotation) in [(2.0f32, 0), (1.0, 36000)] {
             words[18..20].fill(scale.to_bits());
             words[20] = rotation;
-            let layer = image_layer(&image, &words, [0, 0], 255, None, None)
+            let layer = image_layer(&image, &words, [0, 0], 255, None, None, 1.0)
                 .unwrap()
                 .unwrap();
             let side = (4.0 * scale) as u32;
@@ -1729,7 +2384,7 @@ mod scale_tests {
         let mut words = DrawState::default().words;
         words[4..8].copy_from_slice(&[2, 2, 1, 1]);
         words[18..20].copy_from_slice(&[1.5f32.to_bits(), 2.0f32.to_bits()]);
-        let layer = image_layer(&image, &words, [4, 5], 255, None, None)
+        let layer = image_layer(&image, &words, [4, 5], 255, None, None, 1.0)
             .unwrap()
             .unwrap();
         let Layer::Projected { quad, .. } = &layer else {
@@ -1742,10 +2397,231 @@ mod scale_tests {
         assert_eq!(&pixels[(3 * 8 + 5) * 4..(3 * 8 + 5) * 4 + 3], &[0, 0, 0]);
         words[18] = 0;
         assert!(
-            image_layer(&image, &words, [4, 5], 255, None, None)
+            image_layer(&image, &words, [4, 5], 255, None, None, 1.0)
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn hassaku_logical_width_scales_both_axes_and_survives_restore() {
+        let profile = crate::profile::Registry::builtin()
+            .profile("cmvs-20101211")
+            .unwrap();
+        let mut scene = SceneHost::for_profile(profile);
+        scene.set_screen_size(crate::viewport::ScreenSize::new([8, 4]).unwrap());
+        let mut draw = DrawState::default();
+        draw.words[4..6].copy_from_slice(&[12, 6]);
+        draw.words[14] = 0xffff_0000;
+        // Same 3:2 ratio as the real 1920x1080 object on a 1280x720 canvas.
+        // Height is deliberately unrelated: the native factor uses width only.
+        let object = SceneObject {
+            draw: Some(draw),
+            logical_size: [12, 99],
+            ..Default::default()
+        };
+        scene.restore(
+            Default::default(),
+            std::collections::BTreeMap::from([(29, object.clone())]),
+            None,
+            None,
+            None,
+            None,
+        );
+        let frame = render(&scene, 8, 4).unwrap();
+        assert!(
+            frame
+                .pixels()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [255, 0, 0, 255])
+        );
+        assert_eq!(scene.object(29), Some(&object));
+        for change in 0..3 {
+            let mut unknown = profile.clone();
+            match change {
+                0 => unknown.id = "uninspected".into(),
+                1 => {
+                    for binary in &mut unknown.binaries {
+                        binary.sha256 = [0; 32];
+                    }
+                }
+                _ => unknown.base = Some("uninspected".into()),
+            }
+            let mut rejected = SceneHost::for_profile(&unknown);
+            rejected.set_screen_size(crate::viewport::ScreenSize::new([8, 4]).unwrap());
+            rejected.restore(
+                Default::default(),
+                std::collections::BTreeMap::from([(29, object.clone())]),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(render(&rejected, 8, 4).is_err());
+        }
+    }
+
+    #[test]
+    fn logical_image_vertices_scale_position_origin_and_extent_before_half_pixel() {
+        let image = image();
+        let mut words = DrawState::default().words;
+        words[4..8].copy_from_slice(&[2, 2, 1, 1]);
+        words[18..20].copy_from_slice(&[1.5f32.to_bits(), 2.0f32.to_bits()]);
+        let Layer::Projected { quad, .. } =
+            image_layer(&image, &words, [4, 5], 255, None, None, 0.5)
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("logical quad")
+        };
+        assert_eq!(quad, [0.75, 1.0, 2.25, 3.0]);
+        words[18..20].fill(1.0f32.to_bits());
+        words[20] = 9000;
+        let Layer::Rotated { corners, .. } =
+            image_layer(&image, &words, [4, 5], 255, None, None, 0.5)
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("logical rotated quad")
+        };
+        assert_eq!(corners, [[2.0, 1.5], [2.0, 2.5], [1.0, 1.5], [1.0, 2.5]]);
+        // Fractional solid edges use pixel centers, including negative coordinates.
+        words[20] = 0;
+        let Layer::Solid { rect, .. } = solid_layer(&words, [-1, 3], 255, 0.75).unwrap().unwrap()
+        else {
+            panic!("logical solid")
+        };
+        assert_eq!(rect, [-2, 1, 2, 2]);
+    }
+
+    #[test]
+    fn logical_scale_inheritance_uses_parent_factor_even_with_an_explicit_child_width() {
+        let profile = crate::profile::Registry::builtin()
+            .profile("cmvs-20101211")
+            .unwrap();
+        let mut scene = SceneHost::for_profile(profile);
+        scene.set_screen_size(crate::viewport::ScreenSize::new([8, 4]).unwrap());
+        let mut child = SceneObject {
+            logical_size: [4, 1],
+            flags: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            logical_screen_scale(&scene, &child, Some(0.5)).unwrap(),
+            0.5
+        );
+        child.flags = 2;
+        assert_eq!(
+            logical_screen_scale(&scene, &child, Some(0.5)).unwrap(),
+            2.0
+        );
+        child.logical_size[0] = 0;
+        assert_eq!(
+            logical_screen_scale(&scene, &child, Some(0.5)).unwrap(),
+            1.0
+        );
+        child.flags = 3;
+        child.logical_size[0] = 4;
+        let mut p = DrawState::default().words;
+        p[8..10].copy_from_slice(&[2, 4]);
+        let mut c = DrawState::default().words;
+        c[4..6].copy_from_slice(&[2, 2]);
+        c[8..10].copy_from_slice(&[1, 3]);
+        child.image = Some(image());
+        let Layer::Projected { quad, .. } =
+            child_layer(&SceneObject::default(), &p, &child, &c, 0.5)
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("inherited logical quad")
+        };
+        assert_eq!(quad, [1.0, 3.0, 2.0, 4.0]);
+        assert!(require_unit_projection_scale(0.5).is_err());
+    }
+
+    #[test]
+    fn logical_text_parent_keeps_a_fractional_device_anchor() {
+        // As cmvs-font queues a NATSUUTA 0x211c text: an unscaled anchor on a parent with
+        // the text's logical size, and inheriting glyph children offset by the padding.
+        let profile = crate::profile::Registry::builtin()
+            .profile("cmvs-20100314")
+            .unwrap();
+        let mut scene = SceneHost::for_profile(profile);
+        scene.set_screen_size(crate::viewport::ScreenSize::new([800, 600]).unwrap());
+        let mut p = DrawState::default().words;
+        p[8..10].copy_from_slice(&[1, 1]);
+        p[18..20].fill(1.0f32.to_bits());
+        let parent = SceneObject {
+            logical_size: [1280, 960],
+            ..SceneObject::default()
+        };
+        let mut c = DrawState::default().words;
+        c[4..6].copy_from_slice(&[2, 2]);
+        c[8..10].fill(-2i32 as u32);
+        let child = SceneObject {
+            image: Some(image()),
+            ..SceneObject::default()
+        };
+        let parent_scale = logical_screen_scale(&scene, &parent, None).unwrap();
+        assert_eq!(parent_scale, 0.625);
+        let child_scale = logical_screen_scale(&scene, &child, Some(parent_scale)).unwrap();
+        let Layer::Projected { quad, .. } = child_layer(&parent, &p, &child, &c, child_scale)
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("logical text glyph quad")
+        };
+        assert_eq!(quad[..2], [-1.125, -1.125]);
+    }
+
+    #[test]
+    fn logical_mask_scales_geometry_and_keeps_source_space_mask_samples() {
+        let image = ObjectImage {
+            pixels: RgbaImage::new(2, 1, [255, 0, 0, 255].repeat(2)).unwrap(),
+            ..image()
+        };
+        let mask = MaskTransition {
+            put: true,
+            slot: 29,
+            ramp: 100,
+            width: 0,
+            elapsed: 50,
+            mask: ObjectImage {
+                pixels: RgbaImage::new(2, 1, vec![0, 0, 0, 255, 0, 255, 0, 255]).unwrap(),
+                ..image.clone()
+            },
+        };
+        let mut words = DrawState::default().words;
+        words[4..6].copy_from_slice(&[2, 1]);
+        let layer = image_layer(&image, &words, [0, 0], 180, Some(&mask), None, 2.0)
+            .unwrap()
+            .unwrap();
+        let packed = shader::shader_draw(&layer, [4, 2]);
+        assert_eq!(packed.flags(), shader::flags::MASK);
+        assert_eq!(packed.params[3], 1.0);
+        assert_eq!(
+            packed.params[8..16],
+            [0.0, 0.0, 4.0, 0.0, 0.0, 2.0, 4.0, 2.0]
+        );
+        assert_eq!(packed.textures[1], Some(&mask.mask.pixels));
+        for green in 0..256 {
+            assert_eq!(packed.params[24 + green], mask.coverage(green as u8));
+        }
+        let mut pixels = [0, 0, 0, 255].repeat(8);
+        // A transition shader also ignores the ordinary texture subtraction stage.
+        draw(&mut pixels, 4, 2, texture_operation(layer, true));
+        for y in 0..2 {
+            for x in 0..4 {
+                let green = if x < 2 { 0 } else { 255 };
+                let red = (180.0 * mask.coverage(green)).round() as u8;
+                assert_eq!(
+                    &pixels[(y * 4 + x) * 4..(y * 4 + x + 1) * 4],
+                    &[red, 0, 0, 255]
+                );
+            }
+        }
     }
 
     #[test]
@@ -1761,7 +2637,8 @@ mod scale_tests {
             ..SceneObject::default()
         };
         let parent = SceneObject::default();
-        let Layer::Projected { quad, .. } = child_layer(&parent, &p, &child, &c).unwrap().unwrap()
+        let Layer::Projected { quad, .. } =
+            child_layer(&parent, &p, &child, &c, 1.0).unwrap().unwrap()
         else {
             panic!("inherited quad")
         };
@@ -1779,12 +2656,12 @@ mod scale_tests {
         words[18] = 1.5f32.to_bits();
         words[4..6].fill(2);
         assert!(check(&words, false).is_ok());
-        assert!(solid_layer(&words, [0, 0], 255).is_err());
+        assert!(solid_layer(&words, [0, 0], 255, 1.0).is_err());
         words[20] = 1;
         assert!(check(&words, false).is_ok());
         assert!(check(&words, true).is_ok());
         words[18] = 1.0f32.to_bits();
-        assert!(solid_layer(&words, [0, 0], 255).is_err());
+        assert!(solid_layer(&words, [0, 0], 255, 1.0).is_err());
     }
 
     #[test]
@@ -1814,7 +2691,7 @@ mod scale_tests {
         let mut words = DrawState::default().words;
         words[4..6].copy_from_slice(&[2, 1]);
         words[20] = 9000;
-        let layer = image_layer(&image, &words, [4, 5], 255, None, None)
+        let layer = image_layer(&image, &words, [4, 5], 255, None, None, 1.0)
             .unwrap()
             .unwrap();
         let Layer::Rotated { corners, .. } = &layer else {
@@ -1853,10 +2730,10 @@ mod scale_tests {
             elapsed: 0,
             mask: image.clone(),
         };
-        assert!(image_layer(&image, &words, [0, 0], 255, Some(&mask), None).is_err());
+        assert!(image_layer(&image, &words, [0, 0], 255, Some(&mask), None, 1.0).is_err());
         words[18] = 0;
         assert!(
-            image_layer(&image, &words, [0, 0], 255, None, None)
+            image_layer(&image, &words, [0, 0], 255, None, None, 1.0)
                 .unwrap()
                 .is_none()
         );

@@ -25,6 +25,12 @@ imported once without replacing existing local files or deleting old saves.
 Read-only game directories retain that external per-game profile. Lock
 contention, invalid paths and corrupt saves are reported instead of switching
 to an empty profile. Game resource files remain read-only.
+Library launches opt into the core's verified skip-auto-resume policy before
+the first tick, so reopening starts at the title instead of restoring a hidden
+resume slot. This only changes the startup flag in memory; gameplay saves,
+resume files and explicit in-game loading remain available. The standalone
+host keeps its native startup behavior unless it calls
+`cmvs_host_skip_auto_resume` after opening and before ticking.
 `cmvs_native_audio=0` selects the deterministic VM clock for automated replays;
 native audio is enabled by default. Input coordinates are logical frame pixels.
 Pause and pointer cancellation release held input. Unsupported CMVS options

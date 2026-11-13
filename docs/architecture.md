@@ -6,7 +6,7 @@
 
 目标是用 Rust 实现 CMVS 全平台支持，先完成平台无关核心，再通过后端接入系统服务。已有原生目标无第三方依赖的核心、研究 CLI、Windows 桌面预览、可选 wgpu 渲染与音频；其他平台尚未完成构建与行为验证。
 
-当前仅《アマツツミ》PC 样本建立了真实验证档案。五条结局选择链和 OP 已在显式预览条件下通过记录重放回到标题，鉴赏列表、四页入口、首张 CG 及滚动/惯性已通过记录重放，完整选项与原生输出仍待验证。剧情存读档已接入运行时，游戏内工具栏、存读档画面与回看经自动回调调度可用（字号范围外字形等快照状态仍显式报错），全分支和原生完整路线尚未验证；详细运行条件和证据统一见[游戏档案](games/amatsutsumi/README.md)，原有阶段步数表保留在[开发历史](games/amatsutsumi/history.md#原架构文档中的阶段验证详情)。
+当前仅《アマツツミ》PC 样本建立了真实验证档案。五条结局选择链和 OP 已在显式预览条件下通过记录重放回到标题，鉴赏列表、四页入口、首张 CG 及滚动/惯性已通过记录重放，完整选项与原生输出仍待验证。剧情存读档已接入运行时，游戏内工具栏、存读档画面与回看经自动回调调度可用（字号范围外字形等快照状态仍显式报错），全分支和原生完整路线尚未验证；详细运行条件和证据统一见[游戏档案](games/amatsutsumi/README.md)。
 
 下文说明模块职责和执行边界。某个游戏已核对的指令与格式分支不自动代表其他 CMVS 版本兼容；新增游戏按[研究约定](research.md)单独确认。
 
@@ -16,15 +16,17 @@
 |---|---|---|
 | `crates/cmvs-core` | 格式、资源读取、VM、命令语义、场景状态、软件呈现、动作输入与后端契约 | 原生目标无第三方依赖；包含基于 `std` 的只读文件适配器，wasm32 通过 wasm-bindgen 接入 Worker 文件接口，不调用原生窗口或设备 API |
 | `crates/cmvs-wgpu` | 共享队列的 GPU 合成、纹理缓存、呈现及按需读回 | 依赖 core、wgpu、pollster；桌面通过可选 feature 接入 |
-| `crates/cmvs-audio` | Vorbis 解码、混音、原生音频输出、源消费时钟 | 依赖 core、lewton；`mixer` feature 启用 rodio 混音（宿主拉取 PCM，Switch 使用），默认 `native` 再接系统设备 |
+| `crates/cmvs-audio` | Vorbis 解码、混音、原生音频输出、源消费时钟 | 依赖 core、lewton；`mixer` feature 启用 rodio 混音（宿主拉取 PCM，Switch 与 Vita 使用），默认 `native` 再接系统设备 |
 | `crates/cmvs-desktop` | 窗口、物理输入、字体光栅化与按名解析、帧显示与桌面运行入口 | 依赖 core、winit、softbuffer、ico、encoding_rs、ab_glyph；可选依赖 audio；系统服务经 cmvs-native |
 | `crates/cmvs-native` | 操作系统服务的统一接口（字体对话框、系统字体目录），按平台分模块；原生系统 FFI 包 | raw-window-handle；Windows 上 windows-sys。macOS/iOS/Linux/Android/wasm 预留，返回 Unsupported |
+| `crates/cmvs-video` | MGV1 的自研 Theora 解码与 RGBA 转换，可选在工作线程预解码下一帧 | 依赖 core、ogg；桌面、Apple、Android、Switch、Vita 与 probe 使用，[说明](../crates/cmvs-video/README.md) |
+| `crates/cmvs-console` | 游戏机宿主共用的手柄映射、游戏列表、错误页、注释输入编码，以及在 `cmvs_native::GpuDevice` 上执行绘制队列的纹理缓存合成器 | 依赖 core、native、encoding_rs、ab_glyph；Switch 与 Vita 播放器使用 |
 | `platforms/web/native` | wasm Worker 宿主、CPU/WebGPU 画面、文字与输入 | 依赖 core、font、无原生设备 feature 的 audio、wasm-bindgen、self_cell；[当前范围](backends/web.md) |
 | 根包 `cmvs-rs` | 检查 CLI、`cmvs_rs` 兼容重导出、集成测试 | 默认仅依赖 core；通过 `desktop`、`audio-output` 选择后端 |
 
 依赖方向为 `desktop → core`、`desktop → audio → core`。格式、VM 和软件呈现目前保持为 core 内部模块，不新增 C++ 运行核心。后续平台应复用核心语义，通过后端接入系统服务。
 
-默认 workspace 成员仅为根包；全 workspace 构建会额外选择桌面和音频成员。除 `cmvs-native` 外，所有项目包继承 `unsafe_code = forbid` 和严格 Clippy 约定；`cmvs-native` 设为 deny，只在注明 SAFETY 的系统调用处局部允许。新平台在该包内增加同名函数的模块实现，宿主代码不写平台条件；某平台需要独立宿主或依赖很重时拆为单独的包，wasm 宿主已独立为 `cmvs-web`。feature 转发、固定依赖及拆包回归证据见 [workspace](workspace.md)，参考项目提交与许可见 [references](games/amatsutsumi/references.md)。
+默认 workspace 成员仅为根包；全 workspace 构建会额外选择桌面和音频成员。workspace 默认 `unsafe_code = forbid`，平台 FFI 包局部使用 deny；`cmvs-video` 同样设为 deny，仅在注明 SAFETY、带标量对照的私有 SIMD 内核中允许 unsafe，详见 [Theora 解码](design/theora-decoder.md)。新平台在 `cmvs-native` 内增加同名函数的模块实现，宿主代码不写平台条件；某平台需要独立宿主或依赖很重时拆为单独的包，wasm 宿主已独立为 `cmvs-web`。feature 转发、固定依赖及拆包回归证据见 [workspace](workspace.md)，参考项目提交与许可见 [references](games/amatsutsumi/references.md)。
 
 ## 核心职责
 
@@ -34,15 +36,16 @@
 
 - PS2A 支持分段、字节变换、解压、标签与脚本装载。
 - `cpz::ArchiveIndex` / `ArchiveLayout` 按签名分派；当前支持 CPZ3、CPZ5 打包模式 5～9、CPZ6 模式 1 和 CPZ7（资源模式 0/1）。CPZ7 使用每包参数，默认为零；CPZ3 无需启动参数，始终验证索引密文校验值；CPZ5/7 验证头部与索引摘要。公共资源读取验证各格式的数据校验值，CPZ6 头部/索引摘要尚未验证。
-- PB3 支持 type 1、type 3/JBP1、type 5，以及需要参考底图的 type 6；其他分支显式报错。type 5/6 已有 23 个不同真实输出与独立 Python 逐字节对照，未宣称全包覆盖。
+- `ArchiveIndex::write_replacements` 统一按原格式替换写回 CPZ3/5/6/7，保留目录、密钥与未替换资源密文；`Cpz3Index::write`、`Cpz5Index::write`、`Cpz6Index::write` 支持新建对应版本。接口与边界见 [CPZ 读写](formats/cpz-format.md)。
+- PB3 支持 type 1、type 2/3 JBP1、type 5/7，以及需要参考底图的 type 6/8；其他分支显式报错。type 5/6 已有 23 个不同真实输出与独立 Python 逐字节对照，未宣称全包覆盖。
 - CMV6 与 JBPD 支持已核对的全屏影片容器和帧解码；无实际音轨的 CMV6 与静音 CMV9 支持 0x2308 初始场景绑定、默认模式 0 的段播放与循环，CMV9 另缓存静态底图，其他槽控制仍未实现。影片计时、画面解码和设备音轨播放分开。
-- MGV1 按名义帧表解码 Ogg/Theora。容器尺寸须精确等于 Theora picture 或 coded 尺寸；前者裁可见区域，后者保留整个编码表面（如 1920×1088），再按逻辑画布呈现。帧率、YUV420 与像素预算校验保留，见[Hapymaher RE](games/hapymaher_re/README.md#1080p-素材边界)。
+- MGV1 按名义帧表解码 Ogg/Theora。容器尺寸须精确等于 Theora picture 或 coded 尺寸；前者裁可见区域，后者保留整个编码表面（如 1920×1088），再按逻辑画布呈现。容器解析与帧映射在 core，Theora 解码在 `cmvs-video`，由宿主经 `set_mgv_factory` 安装。帧率、YUV420 与像素预算校验保留，见[Hapymaher RE](games/hapymaher_re/README.md#1080p-素材边界)。
 
 `resources::ResourceArchives` 按资源族和注册槽号查找首个命中项：图像十槽，SE/BGM/语音各四槽。归档惰性打开，注册路径变化时重开；缓存键包含资源族与槽号。缺失返回 miss，坏归档、校验失败、路径逃逸明确报错。名称规则和覆盖顺序按证据实现，不套用宿主文件系统的隐式行为。
 
 `image` 在共享读取层之上负责图像来源与解码分派，供场景、消息窗口和遮罩共同使用：
 
-- `pb3::decode` 无 I/O；type 6 通过 `decode_with_base` 或 `image::load` 获得参考上下文，不猜底图路径。
+- `pb3::decode` 无 I/O；type 6/8 通过 `decode_with_base` 或 `image::load` 获得参考上下文，不猜底图路径。
 - `image::load` 经同一 `ImageSource` 与注册源递归读取底图，拒绝循环，限制最多 16 个活动文件及累计原始/RGBA 声明长度 128 MiB；单文件与单图仍分别限制 64 MiB。
 - `image/cache.rs` 保存 `0x203f` 的下一次读取提示与原始字节 LRU，当前留存上限 32 MiB/1024 项；启动容量配置尚未接入。它与 CPZ 索引缓存及已解码 RGBA 分开。
 - `ImageRead` 延迟提交 token 使底图原始字节先于外层提交；解码失败也完成该缓存提交，但不提交 VM 命令或替换旧图像。直接 raw read 在返回前提交。
@@ -192,7 +195,7 @@ VM 运行、帧时间和协作预算分别管理。计时器只在首次运行�
 4. 验证 Windows/macOS/Linux 构建与行为，随后实现 Android/iOS 后端及真机检查；iOS 签名、编译和设备测试仍需对应环境。
 5. 扩展引擎版本与作品兼容矩阵，另行评估 WebAssembly。
 
-维护本文时更新当前能力、模块边界和唯一的当前停点；逐条指令实现过程及历史停点写入 VM 语义或对应格式文档。
+维护本文时更新当前能力、模块边界和支持范围；最终指令语义和证据写入对应游戏及格式文档。
 
 
 0x2308 的资源、解码和对象绑定边界见 [CMV9](formats/cmv9-format.md)。影片槽状态与普通场景对象分开持有；初始帧复用核心软件呈现，未新增平台接口或 C++ 核心。

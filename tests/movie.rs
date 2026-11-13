@@ -218,7 +218,8 @@ impl MovieSource for MgvTestSource {
             height: 1,
             rate: 10,
             rate_time: 1,
-            frames: (0..3)
+            frames: [0, 1, 1, 2]
+                .into_iter()
                 .map(|packet| cmvs_rs::mgv::FrameEntry {
                     packet,
                     key_frame: packet == 0,
@@ -277,7 +278,7 @@ fn mgv_code(queries: usize) -> Vec<u8> {
 fn mgv_player_decodes_before_commit_queries_nominal_frame_and_stops_audio() {
     for id in ["cmvs-20190305", "cmvs-20190405"] {
         use cmvs_rs::audio::MovieAudioClock;
-        let script = program(&mgv_code(2), b"synthetic.mgv\0");
+        let script = program(&mgv_code(3), b"synthetic.mgv\0");
         let mut vm = Machine::new(&script).unwrap();
         let failure = std::rc::Rc::new(std::cell::Cell::new(false));
         let mut movies = MovieHost::default();
@@ -313,6 +314,15 @@ fn mgv_player_decodes_before_commit_queries_nominal_frame_and_stops_audio() {
         pending(&mut vm);
         mgv_step(id, &mut vm, &mut movies, &mut source, &mut audio).unwrap();
         assert_eq!(vm.state().system_integer(0), Some(1));
+        let image = movies.player_image().unwrap().clone();
+        failure.set(true);
+        movies.advance_with_clock(100, None, &mut source).unwrap();
+        assert_eq!(movies.player_image().unwrap(), &image);
+        assert_eq!(movies.player_image().unwrap().frame_id(), image.frame_id());
+        pending(&mut vm);
+        mgv_step(id, &mut vm, &mut movies, &mut source, &mut audio).unwrap();
+        assert_eq!(vm.state().system_integer(0), Some(2));
+        failure.set(false);
         movies.advance_with_clock(300, None, &mut source).unwrap();
         assert!(!movies.has_player());
         pending(&mut vm);
@@ -1539,7 +1549,7 @@ fn cmv6_scene_creation_and_segment_playback_share_the_existing_ownership_rules()
         assert_eq!(vm.stack().len_bytes(), 0);
         assert_eq!(vm.state().system_integer(0), Some(123));
         let p = movies.scene_player(2).unwrap();
-        assert!(matches!(p.index, cmvs_rs::movie::SceneMovieIndex::Cmv6(_)));
+        assert!(matches!(*p.index, cmvs_rs::movie::SceneMovieIndex::Cmv6(_)));
         assert!(!p.playback.active);
         assert_eq!(p.frame, 1);
         assert!(
@@ -1645,7 +1655,7 @@ fn cmv8_scene_creation_binds_an_alpha_image_and_playback_keeps_it() {
         .shared_create_scene(&mut vm, &mut scene, &mut files)
         .unwrap();
     assert!(matches!(
-        movies.scene_player(1).unwrap().index,
+        *movies.scene_player(1).unwrap().index,
         cmvs_rs::movie::SceneMovieIndex::Cmv8(_)
     ));
     let alpha_of = |scene: &cmvs_rs::scene::SceneHost| {
@@ -1667,5 +1677,51 @@ fn cmv8_scene_creation_binds_an_alpha_image_and_playback_keeps_it() {
     for expected in [100, 150, 50] {
         movies.advance_scene(67, &mut scene).unwrap();
         assert_eq!(alpha_of(&scene), expected);
+    }
+}
+
+#[test]
+fn prefetched_scene_frames_match_synchronous_decoding_through_skips_stalls_and_loops() {
+    // CMV6 and CMV9 at 15 fps; display steps include stalls, skipped frames and loop wraps,
+    // so prefetched frames are both used and discarded.
+    let deltas = [
+        67, 0, 33, 34, 67, 200, 67, 67, 1, 66, 133, 67, 67, 67, 400, 67,
+    ];
+    for data in [
+        slot_fixture::cmv6(4, false),
+        slot_fixture::movie_frames(8, 15, 1, false),
+    ] {
+        let run = |prefetch: bool| {
+            let mut code = create_code(1, 28, 0);
+            scene_start(&mut code, &[1, 0, 0, u32::MAX, 1]);
+            let script = program(&code, b"synthetic.cmv\0");
+            let mut vm = Machine::new(&script).unwrap();
+            let mut movies = MovieHost::default();
+            if prefetch {
+                movies.set_scene_prefetch(|| {});
+            }
+            let mut scene = cmvs_rs::scene::SceneHost::default();
+            let mut files = SceneFiles(Some(data.clone()));
+            pending(&mut vm);
+            movies
+                .shared_create_scene(&mut vm, &mut scene, &mut files)
+                .unwrap();
+            pending(&mut vm);
+            movies.shared_start_scene(&mut vm).unwrap();
+            let mut seen = vec![];
+            for delta in deltas {
+                movies.advance_scene(delta, &mut scene).unwrap();
+                let image = scene.object(28).unwrap().image.as_ref().unwrap();
+                seen.push((
+                    movies.scene_player(1).unwrap().frame,
+                    image.pixels.pixels().to_vec(),
+                ));
+            }
+            seen
+        };
+        let expected = run(false);
+        let frames: std::collections::BTreeSet<_> = expected.iter().map(|(f, _)| *f).collect();
+        assert!(frames.len() > 2, "{frames:?}");
+        assert_eq!(run(true), expected);
     }
 }

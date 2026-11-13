@@ -826,7 +826,68 @@ fn selection_needs_data_evidence_and_confirms_every_present_executable() {
 }
 
 #[test]
-fn startup_variants_keep_one_identity_and_require_exact_data() {
+fn modified_data_requires_unique_consistent_known_executables() {
+    let registry = registry();
+    let patched = Evidence {
+        start_script: Some(file("start.ps3", 20)),
+        script_archive: Some(file("script.cpz", 21)),
+        executables: vec![file("cmvs64.exe", 3)],
+    };
+    let selected = registry.select(None, &patched).unwrap();
+    assert_eq!(selected.basis, SelectionBasis::Binary);
+    assert_eq!(selected.record.unwrap().game, "synthetic");
+    assert_eq!(selected.profile.id, "synthetic-derived");
+    assert!(selected.evidence.last().unwrap().contains("modified data"));
+    assert!(
+        registry
+            .select(Some("synthetic-root"), &patched)
+            .unwrap()
+            .record
+            .is_none()
+    );
+    for executables in [
+        vec![],
+        vec![file("cmvs64.exe", 9)],
+        vec![file("cmvs64.exe", 3), file("cmvs32.exe", 1)],
+        vec![file("cmvs64.exe", 3), file("cmvs32.exe", 9)],
+    ] {
+        assert!(matches!(
+            registry.select(
+                None,
+                &Evidence {
+                    executables,
+                    ..patched.clone()
+                }
+            ),
+            Err(SelectionError::UnknownGame(_))
+        ));
+    }
+    let root = registry.profile("synthetic-root").unwrap().to_text();
+    let derived = registry.profile("synthetic-derived").unwrap().to_text();
+    let original = games(&[7; 32], &[8; 32], &[3; 32]);
+    // Shared engine binaries do not uniquely identify a game or save directory.
+    let ambiguous = games(&[10; 32], &[11; 32], &[3; 32]).replace("game synthetic", "game other");
+    let ambiguous = Registry::parse(&[&root, &derived], &format!("{original}{ambiguous}")).unwrap();
+    assert!(matches!(
+        ambiguous.select(None, &patched),
+        Err(SelectionError::UnknownGame(_))
+    ));
+    let other = games(&[10; 32], &[11; 32], &[1; 32])
+        .replace("game synthetic", "game other")
+        .replace("profile synthetic-derived", "profile synthetic-root");
+    let conflicting = Registry::parse(&[&root, &derived], &format!("{original}{other}")).unwrap();
+    for (start, archive) in [(10, 21), (20, 11), (10, 11)] {
+        let evidence = Evidence {
+            start_script: Some(file("start.ps3", start)),
+            script_archive: Some(file("script.cpz", archive)),
+            ..patched.clone()
+        };
+        assert!(conflicting.select(None, &evidence).is_err());
+    }
+}
+
+#[test]
+fn startup_variants_keep_one_identity_with_known_executable_fallback() {
     let root = build("synthetic-root", None, &[0, 1], 1).to_text();
     let derived = build("synthetic-derived", Some("synthetic-root"), &[0, 1], 3).to_text();
     let original = games(&[7; 32], &[8; 32], &[3; 32]);
@@ -855,7 +916,7 @@ fn startup_variants_keep_one_identity_and_require_exact_data() {
             "synthetic"
         );
     }
-    assert!(
+    assert_eq!(
         registry
             .select(
                 None,
@@ -865,7 +926,9 @@ fn startup_variants_keep_one_identity_and_require_exact_data() {
                     executables: vec![file("cmvs64.exe", 3)],
                 }
             )
-            .is_err()
+            .unwrap()
+            .basis,
+        SelectionBasis::Binary
     );
     // Neither a variant hash nor an archive may identify a second save identity.
     for (start, archive) in [(9, 10), (10, 8)] {
@@ -998,6 +1061,40 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     assert_eq!(asukimi.statuses().len(), 864);
     assert_eq!(asukimi.count(CommandStatus::Unreviewed), 519);
     assert_eq!(asukimi.count(CommandStatus::NoOp), 345);
+    let memoria = registry.profile("cmvs-20090815").unwrap();
+    assert_eq!(memoria.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(memoria.binaries.len(), 1);
+    assert_eq!(memoria.count(CommandStatus::Unreviewed), 551);
+    assert_eq!(memoria.count(CommandStatus::NoOp), 313);
+    assert_eq!(memoria.status(0x1d), CommandStatus::NoOp);
+    for (command, id) in [
+        (0x2a2, cmvs_rs::profile::VariantId::FallingBillboardsX87),
+        (0x2a6, cmvs_rs::profile::VariantId::CollisionParticles),
+        (0x2a7, cmvs_rs::profile::VariantId::FadingParticles),
+    ] {
+        assert_eq!(
+            memoria.semantics(command),
+            cmvs_rs::profile::Semantics::Variant(id)
+        );
+    }
+    let natsuuta = registry.profile("cmvs-20100314").unwrap();
+    assert_eq!(natsuuta.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(natsuuta.binaries.len(), 1);
+    assert_eq!(natsuuta.statuses().len(), 864);
+    assert_eq!(natsuuta.count(CommandStatus::Unreviewed), 564);
+    assert_eq!(natsuuta.count(CommandStatus::NoOp), 300);
+    for (command, id) in [
+        (0x11c, cmvs_rs::profile::VariantId::LogicalText),
+        (0x1ca, cmvs_rs::profile::VariantId::WindowOpacityTrack),
+        (0x1d4, cmvs_rs::profile::VariantId::WindowPositionMotion),
+        (0x2a6, cmvs_rs::profile::VariantId::CollisionParticles),
+        (0x30d, cmvs_rs::profile::VariantId::MovieControl),
+    ] {
+        assert_eq!(
+            natsuuta.semantics(command),
+            cmvs_rs::profile::Semantics::Variant(id)
+        );
+    }
     let asunana = registry.profile("cmvs-20080903").unwrap();
     assert_eq!(asunana.base.as_deref(), Some("cmvs-20160201"));
     assert_eq!(asunana.binaries.len(), 1);
@@ -1021,6 +1118,7 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     assert_eq!(hapymaher.count(CommandStatus::Unreviewed), 639);
     assert_eq!(hapymaher.status(0x3a0), CommandStatus::Absent);
     for (profile, cases, handlers, noops) in [
+        (registry.profile("cmvs-20101211").unwrap(), 864, 597, 267),
         (miranosu, 864, 614, 250),
         (kazokubu, 864, 620, 244),
         (base, 976, 721, 255),
@@ -1057,9 +1155,13 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     assert_eq!(
         games,
         [
+            ("puriring", "cmvs-20070119", None),
             ("asukimi", "cmvs-20071117", None),
             ("harouse", "cmvs-20080719", None),
             ("asunana", "cmvs-20080903", None),
+            ("memoria", "cmvs-20090815", None),
+            ("natsuuta", "cmvs-20100314", None),
+            ("hassaku", "cmvs-20101211", None),
             ("miranosu", "cmvs-20110525", None),
             ("kazokubu", "cmvs-20120309", None),
             ("hapymaher", "cmvs-20130131", None),

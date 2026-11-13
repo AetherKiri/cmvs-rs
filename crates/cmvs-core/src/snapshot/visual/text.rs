@@ -43,9 +43,12 @@ pub(crate) fn decode_with_layout(
     let a = r.take(156)?;
     let b = r.take(148)?;
     let c = match layout {
-        SnapshotLayout::TextV1SceneV1 | SnapshotLayout::TextV1SceneV2 | SnapshotLayout::TextV2 => {
-            &[0; 208]
-        }
+        SnapshotLayout::TextV1SceneLegacy
+        | SnapshotLayout::TextV1SceneV1
+        | SnapshotLayout::TextV1SceneV2Collision
+        | SnapshotLayout::TextV1SceneV2
+        | SnapshotLayout::TextV2WindowV2
+        | SnapshotLayout::TextV2 => &[0; 208],
         SnapshotLayout::TextV3 | SnapshotLayout::TextV3SceneV4 => r.take(208)?,
     };
     let word = |block: &[u8], at: usize| u32::from_le_bytes(block[at..at + 4].try_into().unwrap());
@@ -130,7 +133,6 @@ pub(crate) fn decode_with_layout(
     }
     .into();
     Ok(TextObject {
-        encoding: Default::default(),
         font_face,
         face,
         bold: aw(108) != 0,

@@ -45,10 +45,27 @@ pub enum VariantId {
     BackgroundAudio,
     SeRestart,
     SeGain,
+    MixerGain,
+    ImageTables,
+    ActivationPass,
+    WindowScaleMotion,
+    WindowPositionMotion,
+    WindowOpacityTrack,
+    LogicalText,
+    ViewMotion,
+    WindowFullMove,
+    LegacyEffects,
+    WindowChildImage,
+    WindowDrawScale,
+    SequenceWindowImage,
+    DrawQuery,
+    CameraMoveX,
     AudioPreload,
     PolarPoint,
     FallingBillboards,
+    FallingBillboardsX87,
     CollisionParticles,
+    FadingParticles,
     Fragments,
     KeyedArchives,
     DisplayCount,
@@ -73,10 +90,27 @@ impl VariantId {
             "background-audio" => Some(Self::BackgroundAudio),
             "se-restart" => Some(Self::SeRestart),
             "se-gain" => Some(Self::SeGain),
+            "mixer-gain" => Some(Self::MixerGain),
+            "image-tables" => Some(Self::ImageTables),
+            "activation-pass" => Some(Self::ActivationPass),
+            "window-scale-motion" => Some(Self::WindowScaleMotion),
+            "window-position-motion" => Some(Self::WindowPositionMotion),
+            "window-opacity-track" => Some(Self::WindowOpacityTrack),
+            "logical-text" => Some(Self::LogicalText),
+            "view-motion" => Some(Self::ViewMotion),
+            "window-full-move" => Some(Self::WindowFullMove),
+            "legacy-effects" => Some(Self::LegacyEffects),
+            "window-child-image" => Some(Self::WindowChildImage),
+            "window-draw-scale" => Some(Self::WindowDrawScale),
+            "sequence-window-image" => Some(Self::SequenceWindowImage),
+            "draw-query" => Some(Self::DrawQuery),
+            "camera-move-x" => Some(Self::CameraMoveX),
             "audio-preload" => Some(Self::AudioPreload),
             "polar-point" => Some(Self::PolarPoint),
             "falling-billboards" => Some(Self::FallingBillboards),
+            "falling-billboards-x87" => Some(Self::FallingBillboardsX87),
             "collision-particles" => Some(Self::CollisionParticles),
+            "fading-particles" => Some(Self::FadingParticles),
             "fragments" => Some(Self::Fragments),
             "keyed-archives" => Some(Self::KeyedArchives),
             "display-count" => Some(Self::DisplayCount),
@@ -102,10 +136,27 @@ impl VariantId {
             Self::BackgroundAudio => "background-audio",
             Self::SeRestart => "se-restart",
             Self::SeGain => "se-gain",
+            Self::MixerGain => "mixer-gain",
+            Self::ImageTables => "image-tables",
+            Self::ActivationPass => "activation-pass",
+            Self::WindowScaleMotion => "window-scale-motion",
+            Self::WindowPositionMotion => "window-position-motion",
+            Self::WindowOpacityTrack => "window-opacity-track",
+            Self::LogicalText => "logical-text",
+            Self::ViewMotion => "view-motion",
+            Self::WindowFullMove => "window-full-move",
+            Self::LegacyEffects => "legacy-effects",
+            Self::WindowChildImage => "window-child-image",
+            Self::WindowDrawScale => "window-draw-scale",
+            Self::SequenceWindowImage => "sequence-window-image",
+            Self::DrawQuery => "draw-query",
+            Self::CameraMoveX => "camera-move-x",
             Self::AudioPreload => "audio-preload",
             Self::PolarPoint => "polar-point",
             Self::FallingBillboards => "falling-billboards",
+            Self::FallingBillboardsX87 => "falling-billboards-x87",
             Self::CollisionParticles => "collision-particles",
+            Self::FadingParticles => "fading-particles",
             Self::Fragments => "fragments",
             Self::KeyedArchives => "keyed-archives",
             Self::DisplayCount => "display-count",
@@ -241,6 +292,9 @@ impl EngineProfile {
     pub(crate) fn initial_globals(&self) -> Option<[u32; 4]> {
         match self.id.as_str() {
             "cmvs-20140217" | "cmvs-20160201" | "cmvs-20171114" => Some([4096, 262144, 2048, 128]),
+            // docs/games/puriring: .data file bytes end at 0x4ae000; the banks at 0x4b6708,
+            // 0x4dc710 (0x8000 bytes of packed bits, 0x440be0), 0x4da710 and 0x4ba710.
+            "cmvs-20070119" => Some([4096, 262144, 2048, 128]),
             _ => None,
         }
     }
@@ -281,9 +335,27 @@ impl EngineProfile {
                 .is_some()
     }
 
+    /// Independently inspected Primitive Link build; docs/games/puriring.
+    pub(crate) fn is_inspected_20070119(&self) -> bool {
+        self.id == "cmvs-20070119"
+            && self.base.as_deref() == Some("cmvs-20160201")
+            && self
+                .binary(
+                    &crate::digest::parse_hex(
+                        "5ce421db393cbc5ca443fa405c5a9e31c348416109cb1279d91718f490c0e602",
+                    )
+                    .expect("static SHA-256"),
+                )
+                .is_some()
+    }
+
     /// Independently inspected x86 sine interpolation; docs/games/{asukimi,harouse}.
     pub(crate) fn uses_legacy_sine_modes(&self) -> bool {
-        self.is_inspected_20071117() || self.is_inspected_20080719() || self.is_inspected_20080903()
+        self.is_inspected_20071117()
+            || self.is_inspected_20080719()
+            || self.is_inspected_20080903()
+            || self.is_inspected_20090815()
+            || self.is_inspected_20100314()
     }
 
     /// Independently inspected Harouse build; capabilities still bind separately.
@@ -308,6 +380,48 @@ impl EngineProfile {
                 .binary(
                     &crate::digest::parse_hex(
                         "f77ecbfd39d1076c66915544d73b9c2d2c5876fbabeaef3d589050b6094d13ac",
+                    )
+                    .expect("static SHA-256"),
+                )
+                .is_some()
+    }
+
+    /// Independently inspected MEMORIA x86 build; docs/games/memoria.
+    pub(crate) fn is_inspected_20090815(&self) -> bool {
+        self.id == "cmvs-20090815"
+            && self.base.as_deref() == Some("cmvs-20160201")
+            && self
+                .binary(
+                    &crate::digest::parse_hex(
+                        "36fa780a5d2b8df4ac6a6e48a2f78708b79aa10d22eb575a5ae74742d902f71a",
+                    )
+                    .expect("static SHA-256"),
+                )
+                .is_some()
+    }
+
+    /// NATSUUTA x86 build, matched against MEMORIA function by function; docs/games/natsuuta.
+    pub(crate) fn is_inspected_20100314(&self) -> bool {
+        self.id == "cmvs-20100314"
+            && self.base.as_deref() == Some("cmvs-20160201")
+            && self
+                .binary(
+                    &crate::digest::parse_hex(
+                        "97575da34a284fa534084ca8452741e0e176650f3396308f92c2c8cf7ffc9bc8",
+                    )
+                    .expect("static SHA-256"),
+                )
+                .is_some()
+    }
+
+    /// Independently inspected HASSAKU x64 build; docs/games/hassaku.
+    pub(crate) fn is_inspected_20101211(&self) -> bool {
+        self.id == "cmvs-20101211"
+            && self.base.as_deref() == Some("cmvs-20160201")
+            && self
+                .binary(
+                    &crate::digest::parse_hex(
+                        "158409c71cf14c3dedb7d051585e5f48e56dbc621bb19e56d084cd4fe8d4352f",
                     )
                     .expect("static SHA-256"),
                 )
@@ -529,10 +643,14 @@ pub struct Registry {
     contracts: BTreeMap<[u8; 32], ContractProof>,
 }
 
-const BUILTIN_PROFILES: [&str; 14] = [
+const BUILTIN_PROFILES: [&str; 18] = [
+    include_str!("../profiles/cmvs-20070119.profile"),
     include_str!("../profiles/cmvs-20071117.profile"),
     include_str!("../profiles/cmvs-20080719.profile"),
     include_str!("../profiles/cmvs-20080903.profile"),
+    include_str!("../profiles/cmvs-20090815.profile"),
+    include_str!("../profiles/cmvs-20100314.profile"),
+    include_str!("../profiles/cmvs-20101211.profile"),
     include_str!("../profiles/cmvs-20110525.profile"),
     include_str!("../profiles/cmvs-20120309.profile"),
     include_str!("../profiles/cmvs-20130131.profile"),

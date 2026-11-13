@@ -654,11 +654,19 @@ fn root_random(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, B
 }
 
 fn root_settings(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
-    hosts
+    let settings = hosts
         .settings
         .as_deref_mut()
-        .expect("settings capability checked")
-        .handle(call)?;
+        .expect("settings capability checked");
+    let display_name = if call.command == 0x2de && call.argument(4, "mode")? == 0 {
+        hosts
+            .messages
+            .as_deref()
+            .and_then(|messages| messages.display_face_name(settings.font_face()))
+    } else {
+        None
+    };
+    settings.handle_with_font_name(call, display_name.as_deref())?;
     Ok(Flow::Done)
 }
 
@@ -736,8 +744,15 @@ fn root_effect_objects(
         .scene
         .as_deref_mut()
         .expect("effect objects capability checked")
-        .release_effect(call)?;
+        .release_effect(call, audio_backend(&mut hosts.audio))?;
     Ok(Flow::Done)
+}
+/// Effect slot replacement runs the old object's destructor, which releases prepared
+/// sounds; callers without audio can still replace slots that own none.
+fn audio_backend<'h>(audio: &'h mut Option<AudioHosts<'_>>) -> Option<&'h mut dyn AudioBackend> {
+    audio
+        .as_mut()
+        .map(|audio| &mut *audio.backend as &mut dyn AudioBackend)
 }
 
 fn root_wait_fade(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
@@ -795,6 +810,14 @@ fn root_wait_camera(
         .handle_wait_move(call, h.gate, h.input)?)
 }
 
+fn root_wait_view(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let h = hosts.waits.as_mut().expect("wait context checked");
+    Ok(h.camera
+        .as_deref_mut()
+        .expect("camera wait capability checked")
+        .handle_wait_view(call, h.gate, h.input)?)
+}
+
 fn root_audio(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
     let h = hosts.audio.as_mut().expect("audio capability checked");
     h.audio.handle(call, h.backend)?;
@@ -820,8 +843,10 @@ fn root_auxiliary_scene(
         .handle_auxiliary_scene(call, hosts.scene.as_deref_mut())?)
 }
 pub fn uses_message_state(command: u16) -> bool {
-    uses_windows(command)
-        || ROOT.iter().any(|e| {
+    // The font-name query needs the message host's backend to show a readable name.
+    command == 0x2de
+        || uses_windows(command)
+        || entries_any_table(command).iter().copied().any(|e| {
             e.command == command
                 && matches!(
                     e.capability,
@@ -893,7 +918,7 @@ fn root_window_images(
 }
 
 pub fn uses_windows(command: u16) -> bool {
-    ROOT.iter().any(|entry| {
+    entries_any_table(command).iter().copied().any(|entry| {
         entry.command == command
             && matches!(
                 entry.capability,
@@ -905,7 +930,9 @@ pub fn uses_windows(command: u16) -> bool {
     })
 }
 pub fn uses_window_images(command: u16) -> bool {
-    ROOT.iter()
+    entries_any_table(command)
+        .iter()
+        .copied()
         .any(|entry| entry.command == command && entry.capability == Capability::WindowImages)
 }
 
@@ -993,7 +1020,8 @@ fn input_capability(capability: Capability) -> bool {
     )
 }
 pub fn uses_input(command: u16) -> bool {
-    ROOT.iter()
+    root_entry(command)
+        .into_iter()
         .any(|entry| entry.command == command && input_capability(entry.capability))
 }
 pub fn uses_input_for(semantics: Semantics, command: u16) -> bool {
@@ -1112,11 +1140,12 @@ fn root_message_wait(
     Ok(h.messages.handle_wait(call, h.input, h.flags, h.context)?)
 }
 pub fn is_message_wait(command: u16) -> bool {
-    ROOT.iter()
+    root_entry(command)
+        .into_iter()
         .any(|e| e.command == command && e.capability == Capability::MessageWait)
 }
 pub fn is_lifecycle(command: u16) -> bool {
-    ROOT.iter().any(|e| {
+    root_entry(command).into_iter().any(|e| {
         e.command == command && e.capability == Capability::Runtime && matches!(command, 1 | 3)
     })
 }
@@ -1243,17 +1272,17 @@ fn variant_text_dialog(
             .error("text dialog result exceeds native capacity")
             .into());
     }
-    // 0x403b10 keeps only Shift-JIS double-byte characters before the empty fallback.
+    // 0x403b10 keeps only encoded double-byte characters before the empty fallback.
     let text = if accepted {
         let mut full_width = Vec::new();
         let mut i = 0;
         while i < text.len() {
-            if matches!(text[i], 0x81..=0x9f | 0xe0..=0xfc) {
-                let pair = text.get(i..i + 2).ok_or_else(|| {
+            if let Some(len) = call.vm.text_encoding().wide_len(text[i]) {
+                let pair = text.get(i..i + len).ok_or_else(|| {
                     call.error("text dialog has a truncated double-byte character")
                 })?;
                 full_width.extend_from_slice(pair);
-                i += 2;
+                i += len;
             } else {
                 i += 1;
             }
@@ -1350,7 +1379,7 @@ fn root_capture_device(
 }
 /// Platform and capture backends must be borrowed independently of image sources.
 pub fn uses_bootstrap(command: u16) -> bool {
-    ROOT.iter().any(|e| {
+    root_entry(command).into_iter().any(|e| {
         e.command == command
             && matches!(
                 e.capability,
@@ -1366,7 +1395,8 @@ pub fn uses_bootstrap_for(semantics: Semantics, command: u16) -> bool {
     }
 }
 pub fn uses_platform(command: u16) -> bool {
-    ROOT.iter()
+    root_entry(command)
+        .into_iter()
         .any(|e| e.command == command && e.capability == Capability::Platform)
 }
 pub fn uses_platform_for(semantics: Semantics, command: u16) -> bool {
@@ -1385,7 +1415,7 @@ pub fn uses_device_frame_for(semantics: Semantics, command: u16) -> bool {
     }
 }
 pub fn uses_device_frame(command: u16) -> bool {
-    ROOT.iter().any(|e| {
+    root_entry(command).into_iter().any(|e| {
         e.command == command
             && matches!(
                 e.capability,
@@ -1403,6 +1433,7 @@ fn root_sequence(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow,
         scene: &mut *c.scene,
         images: &mut *c.images,
         camera: c.camera.as_deref_mut(),
+        messages: c.messages.as_deref_mut(),
     });
     h.host.handle(call, context)?;
     Ok(Flow::Done)
@@ -1460,11 +1491,14 @@ fn root_movie_player(
     Ok(Flow::Done)
 }
 pub fn uses_sequence(command: u16) -> bool {
-    ROOT.iter()
+    root_entry(command)
+        .into_iter()
+        .chain(SEQUENCE_WINDOW_IMAGE.iter())
         .any(|e| e.command == command && e.capability == Capability::Sequence)
 }
 pub fn uses_movie_scene(command: u16) -> bool {
-    ROOT.iter()
+    root_entry(command)
+        .into_iter()
         .any(|e| e.command == command && e.capability == Capability::MovieScene)
 }
 pub fn uses_movie_scene_for(semantics: Semantics, command: u16) -> bool {
@@ -1475,7 +1509,8 @@ pub fn uses_movie_scene_for(semantics: Semantics, command: u16) -> bool {
     }
 }
 pub fn uses_movie_player(command: u16) -> bool {
-    ROOT.iter()
+    root_entry(command)
+        .into_iter()
         .any(|e| e.command == command && e.capability == Capability::MoviePlayer)
 }
 pub fn uses_movie_player_for(semantics: Semantics, command: u16) -> bool {
@@ -1543,33 +1578,82 @@ fn root_change_image(
 }
 
 pub fn uses_images(command: u16) -> bool {
-    ROOT.iter()
-        .chain(VARIANT_TABLES.iter().flat_map(|table| table.iter()))
-        .any(|e| {
-            e.command == command
-                && matches!(
-                    e.capability,
-                    Capability::SceneImages
-                        | Capability::MaskImages
-                        | Capability::ImageChange
-                        | Capability::ParticleImages
-                )
-        })
-}
-
-pub fn is_wait(command: u16) -> bool {
-    ROOT.iter().any(|e| {
+    entries_any_table(command).iter().copied().any(|e| {
         e.command == command
             && matches!(
                 e.capability,
-                Capability::FadeWait
-                    | Capability::MaskWait
-                    | Capability::QuakeWait
-                    | Capability::StripWait
-                    | Capability::ChangeWait
-                    | Capability::CameraWait
+                Capability::SceneImages
+                    | Capability::MaskImages
+                    | Capability::ImageChange
+                    | Capability::ParticleImages
             )
     })
+}
+
+fn is_wait_capability(capability: Capability) -> bool {
+    matches!(
+        capability,
+        Capability::FadeWait
+            | Capability::MaskWait
+            | Capability::QuakeWait
+            | Capability::StripWait
+            | Capability::ChangeWait
+            | Capability::CameraWait
+    )
+}
+pub fn is_wait(command: u16) -> bool {
+    root_entry(command)
+        .into_iter()
+        .any(|e| e.command == command && is_wait_capability(e.capability))
+}
+/// Waits of the selected semantics, including profile-bound variants.
+pub fn is_wait_for(semantics: Semantics, command: u16) -> bool {
+    match semantics {
+        Semantics::Root => is_wait(command),
+        Semantics::Variant(id) => {
+            variant_entry(id, command).is_some_and(|e| is_wait_capability(e.capability))
+        }
+    }
+}
+
+/// The ROOT entry for `command`, through an index built once: system commands are
+/// classified many times per VM step, and ROOT holds each command at most once
+/// (`root_commands_are_unique`).
+fn root_entry(command: u16) -> Option<&'static Entry> {
+    static INDEX: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let size = ROOT
+            .iter()
+            .map(|e| usize::from(e.command) + 1)
+            .max()
+            .unwrap_or(0);
+        let mut index = vec![u16::MAX; size];
+        for (at, entry) in ROOT.iter().enumerate().rev() {
+            index[usize::from(entry.command)] = at as u16;
+        }
+        index
+    });
+    match index.get(usize::from(command)) {
+        Some(&at) if at != u16::MAX => Some(&ROOT[usize::from(at)]),
+        _ => None,
+    }
+}
+/// Every entry for `command` in ROOT and then [`VARIANT_TABLES`], in table order.
+fn entries_any_table(command: u16) -> &'static [&'static Entry] {
+    static INDEX: std::sync::OnceLock<Vec<Vec<&'static Entry>>> = std::sync::OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let all = || {
+            ROOT.iter()
+                .chain(VARIANT_TABLES.iter().flat_map(|table| table.iter()))
+        };
+        let size = all().map(|e| usize::from(e.command) + 1).max().unwrap_or(0);
+        let mut index = vec![Vec::new(); size];
+        for entry in all() {
+            index[usize::from(entry.command)].push(entry);
+        }
+        index
+    });
+    index.get(usize::from(command)).map_or(&[], Vec::as_slice)
 }
 
 pub static ROOT: &[Entry] = &[
@@ -1610,14 +1694,14 @@ pub static ROOT: &[Entry] = &[
         handler: root_runtime,
     },
     Entry {
-        command: 0x2b8,
-        name: "build thumbnail",
+        command: 0x2b7,
+        name: "latest save slot",
         capability: Capability::Runtime,
         handler: root_runtime,
     },
     Entry {
-        command: 0x2b7,
-        name: "latest save slot",
+        command: 0x2b8,
+        name: "build thumbnail",
         capability: Capability::Runtime,
         handler: root_runtime,
     },
@@ -1981,17 +2065,17 @@ pub static ROOT: &[Entry] = &[
         capability: Capability::Capture,
         handler: root_capture,
     },
-    Entry {
-        command: 0x3e,
-        name: "read device frame",
-        capability: Capability::CaptureDevice,
-        handler: root_capture_device,
-    },
     // ASUKIMI x86 0x440390 -> 0x4215c0 -> 0x41c2b0 reads the completed
     // device frame as an opaque image. See docs/games/asukimi.
     Entry {
         command: 0x3d,
         name: "read legacy device frame",
+        capability: Capability::CaptureDevice,
+        handler: root_capture_device,
+    },
+    Entry {
+        command: 0x3e,
+        name: "read device frame",
         capability: Capability::CaptureDevice,
         handler: root_capture_device,
     },
@@ -2590,6 +2674,12 @@ pub static ROOT: &[Entry] = &[
         handler: root_windows,
     },
     Entry {
+        command: 0x15e,
+        name: "window position query",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+    Entry {
         command: 0x171,
         name: "release window image",
         capability: Capability::Windows,
@@ -2738,12 +2828,6 @@ pub static ROOT: &[Entry] = &[
         name: "window pointer hit",
         capability: Capability::WindowPointer,
         handler: root_window_pointer,
-    },
-    Entry {
-        command: 0x15e,
-        name: "window position query",
-        capability: Capability::Windows,
-        handler: root_windows,
     },
     Entry {
         command: 0x194,
@@ -2980,6 +3064,12 @@ pub static ROOT: &[Entry] = &[
         handler: root_input,
     },
     Entry {
+        command: 0x2ef,
+        name: "query skipping",
+        capability: Capability::Input,
+        handler: root_input,
+    },
+    Entry {
         command: 0x344,
         name: "query input action 22",
         capability: Capability::Input,
@@ -3036,12 +3126,6 @@ pub static ROOT: &[Entry] = &[
     Entry {
         command: 0x35d,
         name: "right press",
-        capability: Capability::Input,
-        handler: root_input,
-    },
-    Entry {
-        command: 0x2ef,
-        name: "query skipping",
         capability: Capability::Input,
         handler: root_input,
     },
@@ -3610,6 +3694,12 @@ pub static ROOT: &[Entry] = &[
         handler: root_scene,
     },
     Entry {
+        command: 0x2ae,
+        name: "query image fragment completion",
+        capability: Capability::Scene,
+        handler: root_scene,
+    },
+    Entry {
         command: 0x2c5,
         name: "cancel image change",
         capability: Capability::Scene,
@@ -3636,6 +3726,12 @@ pub static ROOT: &[Entry] = &[
     Entry {
         command: 0x322,
         name: "second texture subtraction",
+        capability: Capability::Scene,
+        handler: root_scene,
+    },
+    Entry {
+        command: 0x328,
+        name: "object row wave or afterimages",
         capability: Capability::Scene,
         handler: root_scene,
     },
@@ -4282,6 +4378,18 @@ pub static ROOT: &[Entry] = &[
         handler: root_effect_objects,
     },
     Entry {
+        command: 0x2a2,
+        name: "create falling billboard effect",
+        capability: Capability::ParticleImages,
+        handler: FALLING_BILLBOARDS[0].handler,
+    },
+    Entry {
+        command: 0x2a8,
+        name: "create image fragment effect",
+        capability: Capability::SceneRandom,
+        handler: FRAGMENTS[0].handler,
+    },
+    Entry {
         command: 0xd0,
         name: "integer absolute",
         capability: Capability::Math,
@@ -4811,7 +4919,8 @@ pub static RAIN: &[Entry] = &[Entry {
             .images
             .as_mut()
             .expect("particle image capability checked");
-        h.scene.create_rain(call, h.source)?;
+        h.scene
+            .create_rain(call, h.source, audio_backend(&mut hosts.audio))?;
         Ok(Flow::Done)
     },
 }];
@@ -4833,6 +4942,7 @@ pub static PARTICLES: &[Entry] = &[Entry {
                 .as_deref_mut()
                 .expect("particle random capability checked"),
             false,
+            audio_backend(&mut hosts.audio),
         )?;
         Ok(Flow::Done)
     },
@@ -4855,6 +4965,7 @@ pub static PARTICLES_X87: &[Entry] = &[Entry {
                 .as_deref_mut()
                 .expect("particle random capability checked"),
             true,
+            audio_backend(&mut hosts.audio),
         )?;
         Ok(Flow::Done)
     },
@@ -4939,6 +5050,32 @@ pub static FALLING_BILLBOARDS: &[Entry] = &[Entry {
                 .random
                 .as_deref_mut()
                 .expect("particle random capability checked"),
+            false,
+            audio_backend(&mut hosts.audio),
+        )?;
+        Ok(Flow::Done)
+    },
+}];
+
+/// MEMORIA 0x22a2 / 0x4539a0: the same type-2 effect with x87 arithmetic.
+pub static FALLING_BILLBOARDS_X87: &[Entry] = &[Entry {
+    command: 0x2a2,
+    name: "create x87 falling billboard effect",
+    capability: Capability::ParticleImages,
+    handler: |hosts, call| {
+        let h = hosts
+            .images
+            .as_mut()
+            .expect("particle image capability checked");
+        h.scene.create_falling_effect(
+            call,
+            h.source,
+            hosts
+                .random
+                .as_deref_mut()
+                .expect("particle random capability checked"),
+            true,
+            audio_backend(&mut hosts.audio),
         )?;
         Ok(Flow::Done)
     },
@@ -4960,6 +5097,7 @@ pub static FRAGMENTS: &[Entry] = &[
                         .random
                         .as_deref_mut()
                         .expect("scene random capability checked"),
+                    audio_backend(&mut hosts.audio),
                 )?;
             Ok(Flow::Done)
         },
@@ -4996,6 +5134,7 @@ pub static COLLISION_PARTICLES: &[Entry] = &[
                     .random
                     .as_deref_mut()
                     .expect("particle random capability checked"),
+                audio_backend(&mut hosts.audio),
             )?;
             Ok(Flow::Done)
         },
@@ -5019,6 +5158,29 @@ pub static COLLISION_PARTICLES: &[Entry] = &[
         handler: collision_mesh,
     },
 ];
+/// MEMORIA 0x22a7 / 0x453d20: type 7 takes the 0x22a6 arguments and pool, without collision.
+pub static FADING_PARTICLES: &[Entry] = &[Entry {
+    command: 0x2a7,
+    name: "create fading particle effect",
+    capability: Capability::ParticleImages,
+    handler: |hosts, call| {
+        let h = hosts
+            .images
+            .as_mut()
+            .expect("particle image capability checked");
+        h.scene.create_collision_effect(
+            call,
+            h.source,
+            hosts
+                .random
+                .as_deref_mut()
+                .expect("particle random capability checked"),
+            audio_backend(&mut hosts.audio),
+        )?;
+        Ok(Flow::Done)
+    },
+}];
+
 fn collision_mesh(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
     hosts
         .scene
@@ -5064,15 +5226,24 @@ pub static TEXT_ALPHA: &[Entry] = &[Entry {
     handler: root_settings,
 }];
 
-pub static POLAR_POINT: &[Entry] = &[Entry {
-    command: 0xd8,
-    name: "integer polar point",
-    capability: Capability::Math,
-    handler: |_hosts, call| {
-        crate::math::handle_polar_point(call)?;
-        Ok(Flow::Done)
+pub static POLAR_POINT: &[Entry] = &[
+    Entry {
+        command: 0xd8,
+        name: "integer polar point",
+        capability: Capability::Math,
+        handler: polar_point,
     },
-}];
+    Entry {
+        command: 0xd9,
+        name: "hundredth-degree polar point",
+        capability: Capability::Math,
+        handler: polar_point,
+    },
+];
+fn polar_point(_hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    crate::math::handle_polar_point(call)?;
+    Ok(Flow::Done)
+}
 
 pub static AUDIO_PRELOAD: &[Entry] = &[
     Entry {
@@ -5155,6 +5326,457 @@ pub static SE_GAIN: &[Entry] = &[Entry {
     handler: |hosts, call| {
         let h = hosts.audio.as_mut().expect("audio capability checked");
         h.audio.set_se_gain(call, h.backend)?;
+        Ok(Flow::Done)
+    },
+}];
+
+pub static MIXER_GAIN: &[Entry] = &[Entry {
+    command: 0xa5,
+    name: "device mixer gain",
+    capability: Capability::Audio,
+    handler: |hosts, call| {
+        let h = hosts.audio.as_mut().expect("audio capability checked");
+        h.audio.set_mixer_gain(call, h.backend)?;
+        Ok(Flow::Done)
+    },
+}];
+
+/// cmvs-20070119 0x22c0 (0x43d310) / 0x22c1 (0x43d3a0) read SP-4 without other
+/// arguments, return 0x4004 and set the system result to `SP-4 == 1 && check`, where the
+/// check verifies the retail activation file `comap.dat` (0x22c0 first runs `reg.exe`).
+/// The activation and disc checks are deliberately not reimplemented: the check is
+/// reported as passed, with no file, process, registry or drive access.
+fn activation_pass(
+    _hosts: &mut Hosts<'_>,
+    call: &mut Call<'_, '_>,
+) -> Result<Flow, Box<dyn Error>> {
+    let mode = call.argument(4, "check mode")?;
+    call.complete(0x4004)?;
+    call.vm
+        .state_mut()
+        .set_system_integer(0, u32::from(mode == 1))
+        .expect("slot zero exists");
+    Ok(Flow::Done)
+}
+
+pub static ACTIVATION_PASS: &[Entry] = &[
+    Entry {
+        command: 0x2c0,
+        name: "activation check (reported as passed)",
+        capability: Capability::Math,
+        handler: activation_pass,
+    },
+    Entry {
+        command: 0x2c1,
+        name: "activation check (reported as passed)",
+        capability: Capability::Math,
+        handler: activation_pass,
+    },
+];
+
+fn legacy_snow_field(
+    hosts: &mut Hosts<'_>,
+    call: &mut Call<'_, '_>,
+) -> Result<Flow, Box<dyn Error>> {
+    let h = hosts.images.as_mut().expect("image capability checked");
+    h.scene
+        .create_snow_field(call, h.source, audio_backend(&mut hosts.audio))?;
+    Ok(Flow::Done)
+}
+fn legacy_floating_planes(
+    hosts: &mut Hosts<'_>,
+    call: &mut Call<'_, '_>,
+) -> Result<Flow, Box<dyn Error>> {
+    let (Some(images), Some(audio)) = (hosts.images.as_mut(), hosts.audio.as_mut()) else {
+        return Ok(Flow::Unavailable);
+    };
+    images
+        .scene
+        .create_floating_planes(call, images.source, audio.backend)?;
+    Ok(Flow::Done)
+}
+fn legacy_magic(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let (Some(images), Some(audio), Some(camera), Some(random)) = (
+        hosts.images.as_mut(),
+        hosts.audio.as_mut(),
+        hosts.camera.as_deref_mut(),
+        hosts.random.as_deref_mut(),
+    ) else {
+        return Ok(Flow::Unavailable);
+    };
+    images
+        .scene
+        .create_magic(call, images.source, audio.backend, camera, random)?;
+    Ok(Flow::Done)
+}
+fn legacy_vortex(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let (Some(images), Some(audio), Some(camera), Some(random)) = (
+        hosts.images.as_mut(),
+        hosts.audio.as_mut(),
+        hosts.camera.as_deref_mut(),
+        hosts.random.as_deref_mut(),
+    ) else {
+        return Ok(Flow::Unavailable);
+    };
+    images
+        .scene
+        .create_vortex(call, images.source, audio.backend, camera, random)?;
+    Ok(Flow::Done)
+}
+fn legacy_curtain(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let (Some(images), Some(audio), Some(camera)) = (
+        hosts.images.as_mut(),
+        hosts.audio.as_mut(),
+        hosts.camera.as_deref_mut(),
+    ) else {
+        return Ok(Flow::Unavailable);
+    };
+    images
+        .scene
+        .create_curtain(call, images.source, audio.backend, camera)?;
+    Ok(Flow::Done)
+}
+fn legacy_sprites(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let (Some(images), Some(audio)) = (hosts.images.as_mut(), hosts.audio.as_mut()) else {
+        return Ok(Flow::Unavailable);
+    };
+    images
+        .scene
+        .create_sprites(call, images.source, audio.backend)?;
+    Ok(Flow::Done)
+}
+fn legacy_circle(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let (Some(images), Some(audio)) = (hosts.images.as_mut(), hosts.audio.as_mut()) else {
+        return Ok(Flow::Unavailable);
+    };
+    images
+        .scene
+        .create_circle(call, images.source, audio.backend)?;
+    Ok(Flow::Done)
+}
+fn legacy_walk(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let (Some(scene), Some(camera), Some(audio)) = (
+        hosts.scene.as_deref_mut(),
+        hosts.camera.as_deref_mut(),
+        hosts.audio.as_mut(),
+    ) else {
+        return Ok(Flow::Unavailable);
+    };
+    scene.create_walk(call, camera, audio.backend)?;
+    Ok(Flow::Done)
+}
+fn legacy_query(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let scene = hosts
+        .scene
+        .as_deref_mut()
+        .expect("scene capability checked");
+    let slot = call.argument(4, "effect slot")?;
+    match (slot < 4)
+        .then(|| scene.query_legacy_effect(slot as u8))
+        .flatten()
+    {
+        Some(value) => {
+            call.complete(0x4004)?;
+            call.vm
+                .state_mut()
+                .set_system_integer(0, value)
+                .expect("result slot exists");
+        }
+        None => scene.query_fragments(call)?,
+    }
+    Ok(Flow::Done)
+}
+fn legacy_set(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let scene = hosts
+        .scene
+        .as_deref_mut()
+        .expect("scene capability checked");
+    scene.set_legacy_effect(call)?;
+    Ok(Flow::Done)
+}
+
+/// cmvs-20070119 effect slots of types 0x50.. ; see effect_objects::legacy.
+pub static LEGACY_EFFECTS: &[Entry] = &[
+    Entry {
+        command: 0x2a3,
+        name: "create legacy falling flakes",
+        capability: Capability::ParticleImages,
+        handler: |hosts, call| {
+            let h = hosts
+                .images
+                .as_mut()
+                .expect("particle image capability checked");
+            h.scene.create_legacy_flakes(
+                call,
+                h.source,
+                hosts
+                    .random
+                    .as_deref_mut()
+                    .expect("particle random capability checked"),
+                audio_backend(&mut hosts.audio),
+            )?;
+            Ok(Flow::Done)
+        },
+    },
+    Entry {
+        command: 0x2a1,
+        name: "create legacy rain streak effect",
+        capability: Capability::ParticleImages,
+        handler: |hosts, call| {
+            let h = hosts
+                .images
+                .as_mut()
+                .expect("particle image capability checked");
+            h.scene
+                .create_rain(call, h.source, audio_backend(&mut hosts.audio))?;
+            Ok(Flow::Done)
+        },
+    },
+    Entry {
+        command: 0x294,
+        name: "create magic effect",
+        capability: Capability::SceneImages,
+        handler: legacy_magic,
+    },
+    Entry {
+        command: 0x293,
+        name: "create curtain effect",
+        capability: Capability::SceneImages,
+        handler: legacy_curtain,
+    },
+    Entry {
+        command: 0x295,
+        name: "create sprite effect",
+        capability: Capability::SceneImages,
+        handler: legacy_sprites,
+    },
+    Entry {
+        command: 0x296,
+        name: "create floating planes effect",
+        capability: Capability::SceneImages,
+        handler: legacy_floating_planes,
+    },
+    Entry {
+        command: 0x297,
+        name: "create vortex effect",
+        capability: Capability::SceneImages,
+        handler: legacy_vortex,
+    },
+    Entry {
+        command: 0x290,
+        name: "create snow field effect",
+        capability: Capability::SceneImages,
+        handler: legacy_snow_field,
+    },
+    Entry {
+        command: 0x292,
+        name: "create circle effect",
+        capability: Capability::SceneImages,
+        handler: legacy_circle,
+    },
+    Entry {
+        command: 0x291,
+        name: "create walk effect",
+        capability: Capability::Scene,
+        handler: legacy_walk,
+    },
+    Entry {
+        command: 0x2a0,
+        name: "release effect object",
+        capability: Capability::Scene,
+        handler: root_effect_objects,
+    },
+    Entry {
+        command: 0x2ae,
+        name: "query effect object",
+        capability: Capability::Scene,
+        handler: legacy_query,
+    },
+    Entry {
+        command: 0x2af,
+        name: "set effect object parameter",
+        capability: Capability::Scene,
+        handler: legacy_set,
+    },
+];
+
+pub static CAMERA_MOVE_X: &[Entry] = &[Entry {
+    command: 0x6e,
+    name: "move camera X",
+    capability: Capability::Camera,
+    handler: root_camera,
+}];
+
+pub static DRAW_QUERY: &[Entry] = &[Entry {
+    command: 0x4f,
+    name: "object draw query",
+    capability: Capability::Scene,
+    handler: |hosts, call| {
+        hosts
+            .scene
+            .as_deref_mut()
+            .expect("scene capability checked")
+            .draw_query(call)?;
+        Ok(Flow::Done)
+    },
+}];
+
+pub static SEQUENCE_WINDOW_IMAGE: &[Entry] = &[Entry {
+    command: 0x28b,
+    name: "append window image replacement",
+    capability: Capability::Sequence,
+    handler: root_sequence,
+}];
+
+pub static WINDOW_DRAW_SCALE: &[Entry] = &[Entry {
+    command: 0x18b,
+    name: "window draw scale",
+    capability: Capability::Windows,
+    handler: root_windows,
+}];
+
+pub static WINDOW_CHILD_IMAGE: &[Entry] = &[Entry {
+    command: 0x176,
+    name: "window child image",
+    capability: Capability::WindowImages,
+    handler: root_window_images,
+}];
+
+pub static VIEW_MOTION: &[Entry] = &[
+    Entry {
+        command: 0x270,
+        name: "stop view motion",
+        capability: Capability::Camera,
+        handler: root_camera,
+    },
+    Entry {
+        command: 0x271,
+        name: "wait view motion",
+        capability: Capability::CameraWait,
+        handler: root_wait_view,
+    },
+    Entry {
+        command: 0x272,
+        name: "view moving",
+        capability: Capability::Camera,
+        handler: root_camera,
+    },
+    Entry {
+        command: 0x273,
+        name: "move view position",
+        capability: Capability::Camera,
+        handler: root_camera,
+    },
+    Entry {
+        command: 0x274,
+        name: "move view angles",
+        capability: Capability::Camera,
+        handler: root_camera,
+    },
+];
+
+pub static WINDOW_SCALE_MOTION: &[Entry] = &[
+    Entry {
+        command: 0x1c0,
+        name: "create window scale motion",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+    Entry {
+        command: 0x1c1,
+        name: "set key window scale motion",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+    Entry {
+        command: 0x1c2,
+        name: "start window scale motion",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+];
+
+pub static WINDOW_POSITION_MOTION: &[Entry] = &[
+    Entry {
+        command: 0x1d4,
+        name: "create window position motion",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+    Entry {
+        command: 0x1d5,
+        name: "set key window position motion",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+    Entry {
+        command: 0x1d6,
+        name: "start window position motion",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+];
+
+pub static WINDOW_OPACITY_TRACK: &[Entry] = &[
+    Entry {
+        command: 0x1ca,
+        name: "create window opacity track",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+    Entry {
+        command: 0x1cb,
+        name: "set key window opacity track",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+    Entry {
+        command: 0x1cc,
+        name: "start window opacity track",
+        capability: Capability::Windows,
+        handler: root_windows,
+    },
+];
+
+pub static LOGICAL_TEXT: &[Entry] = &[Entry {
+    command: 0x11c,
+    name: "create text object with logical size",
+    capability: Capability::TextState,
+    handler: root_text_state,
+}];
+
+pub static IMAGE_TABLES: &[Entry] = &[
+    Entry {
+        command: 0x17,
+        name: "register stand image archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x18,
+        name: "register auxiliary image archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x32,
+        name: "stand scene image",
+        capability: Capability::SceneImages,
+        handler: root_images,
+    },
+];
+
+pub static WINDOW_FULL_MOVE: &[Entry] = &[Entry {
+    command: 0x2ec,
+    name: "window full move",
+    capability: Capability::Platform,
+    handler: |hosts, call| {
+        hosts
+            .platform
+            .as_mut()
+            .expect("platform capability checked")
+            .host
+            .handle_window_full_move(call)?;
         Ok(Flow::Done)
     },
 }];
@@ -5340,6 +5962,21 @@ pub static TEXT_DIALOG: &[Entry] = &[
 pub static VARIANT_TABLES: &[&[Entry]] = &[
     TEXT_DIALOG,
     SE_GAIN,
+    MIXER_GAIN,
+    IMAGE_TABLES,
+    ACTIVATION_PASS,
+    WINDOW_SCALE_MOTION,
+    WINDOW_POSITION_MOTION,
+    WINDOW_OPACITY_TRACK,
+    LOGICAL_TEXT,
+    VIEW_MOTION,
+    WINDOW_FULL_MOVE,
+    LEGACY_EFFECTS,
+    WINDOW_CHILD_IMAGE,
+    WINDOW_DRAW_SCALE,
+    SEQUENCE_WINDOW_IMAGE,
+    DRAW_QUERY,
+    CAMERA_MOVE_X,
     MOVIE_CONTROL,
     MOVIE_SEEK,
     SCREEN_COORDINATES,
@@ -5360,14 +5997,32 @@ pub static VARIANT_TABLES: &[&[Entry]] = &[
     OBJECT_QUEUE,
     LIST_SELECT,
     FALLING_BILLBOARDS,
+    FALLING_BILLBOARDS_X87,
     COLLISION_PARTICLES,
+    FADING_PARTICLES,
     FRAGMENTS,
 ];
 
+#[rustfmt::skip]
 pub fn variant_entry(id: crate::profile::VariantId, command: u16) -> Option<&'static Entry> {
     let entries = match id {
         crate::profile::VariantId::TextDialog => TEXT_DIALOG,
         crate::profile::VariantId::SeGain => SE_GAIN,
+        crate::profile::VariantId::MixerGain => MIXER_GAIN,
+        crate::profile::VariantId::ImageTables => IMAGE_TABLES,
+        crate::profile::VariantId::ActivationPass => ACTIVATION_PASS,
+        crate::profile::VariantId::WindowScaleMotion => WINDOW_SCALE_MOTION,
+        crate::profile::VariantId::WindowPositionMotion => WINDOW_POSITION_MOTION,
+        crate::profile::VariantId::WindowOpacityTrack => WINDOW_OPACITY_TRACK,
+        crate::profile::VariantId::LogicalText => LOGICAL_TEXT,
+        crate::profile::VariantId::ViewMotion => VIEW_MOTION,
+        crate::profile::VariantId::WindowFullMove => WINDOW_FULL_MOVE,
+        crate::profile::VariantId::LegacyEffects => LEGACY_EFFECTS,
+        crate::profile::VariantId::WindowChildImage => WINDOW_CHILD_IMAGE,
+        crate::profile::VariantId::WindowDrawScale => WINDOW_DRAW_SCALE,
+        crate::profile::VariantId::SequenceWindowImage => SEQUENCE_WINDOW_IMAGE,
+        crate::profile::VariantId::DrawQuery => DRAW_QUERY,
+        crate::profile::VariantId::CameraMoveX => CAMERA_MOVE_X,
         crate::profile::VariantId::MovieControl => MOVIE_CONTROL,
         crate::profile::VariantId::MovieSeek => MOVIE_SEEK,
         crate::profile::VariantId::ScreenCoordinates => SCREEN_COORDINATES,
@@ -5388,29 +6043,41 @@ pub fn variant_entry(id: crate::profile::VariantId, command: u16) -> Option<&'st
         crate::profile::VariantId::AudioPreload => AUDIO_PRELOAD,
         crate::profile::VariantId::PolarPoint => POLAR_POINT,
         crate::profile::VariantId::FallingBillboards => FALLING_BILLBOARDS,
+        crate::profile::VariantId::FallingBillboardsX87 => FALLING_BILLBOARDS_X87,
         crate::profile::VariantId::CollisionParticles => COLLISION_PARTICLES,
+        crate::profile::VariantId::FadingParticles => FADING_PARTICLES,
         crate::profile::VariantId::Fragments => FRAGMENTS,
     };
     entries.iter().find(|entry| entry.command == command)
 }
 
+#[rustfmt::skip]
 pub fn semantics_name(profile: &EngineProfile, command: u16) -> &'static str {
     match profile.semantics(command) {
         Semantics::Variant(crate::profile::VariantId::TextDialog) => "variant text dialog",
         Semantics::Variant(crate::profile::VariantId::SeGain) => "variant SE gain multiplier",
-        Semantics::Variant(crate::profile::VariantId::MovieControl) => {
-            "variant scene movie control"
-        }
+        Semantics::Variant(crate::profile::VariantId::MixerGain) => "variant device mixer gain",
+        Semantics::Variant(crate::profile::VariantId::ImageTables) => "variant separate image tables",
+        Semantics::Variant(crate::profile::VariantId::ActivationPass) => "variant activation check reported as passed",
+        Semantics::Variant(crate::profile::VariantId::WindowScaleMotion) => "variant window scale motion",
+        Semantics::Variant(crate::profile::VariantId::WindowPositionMotion) => "variant window position motion",
+        Semantics::Variant(crate::profile::VariantId::WindowOpacityTrack) => "variant window opacity track",
+        Semantics::Variant(crate::profile::VariantId::LogicalText) => "variant text with logical size",
+        Semantics::Variant(crate::profile::VariantId::ViewMotion) => "variant device view motion",
+        Semantics::Variant(crate::profile::VariantId::WindowFullMove) => "variant unscaled fullscreen origin",
+        Semantics::Variant(crate::profile::VariantId::LegacyEffects) => "variant legacy effect slots",
+        Semantics::Variant(crate::profile::VariantId::WindowChildImage) => "variant window child image",
+        Semantics::Variant(crate::profile::VariantId::WindowDrawScale) => "variant window draw scale",
+        Semantics::Variant(crate::profile::VariantId::SequenceWindowImage) => "variant sequence window image",
+        Semantics::Variant(crate::profile::VariantId::DrawQuery) => "variant object draw query",
+        Semantics::Variant(crate::profile::VariantId::CameraMoveX) => "variant camera X move",
+        Semantics::Variant(crate::profile::VariantId::MovieControl) => "variant scene movie control",
         Semantics::Variant(crate::profile::VariantId::MovieSeek) => "variant scene movie seek",
-        Semantics::Variant(crate::profile::VariantId::ScreenCoordinates) => {
-            "variant screen coordinates"
-        }
+        Semantics::Variant(crate::profile::VariantId::ScreenCoordinates) => "variant screen coordinates",
         Semantics::Variant(crate::profile::VariantId::InputPress) => "variant input down edge",
         Semantics::Variant(crate::profile::VariantId::MgvPlayer) => "variant MGV player",
         Semantics::Variant(crate::profile::VariantId::DisplayCount) => "variant display count",
-        Semantics::Variant(crate::profile::VariantId::FullscreenMonitor) => {
-            "variant fullscreen monitor"
-        }
+        Semantics::Variant(crate::profile::VariantId::FullscreenMonitor) => "variant fullscreen monitor",
         Semantics::Variant(crate::profile::VariantId::KeyedArchives) => "variant keyed archives",
         Semantics::Variant(crate::profile::VariantId::ListSelect) => "variant list selection",
         Semantics::Variant(crate::profile::VariantId::ObjectQueue) => "variant object queue",
@@ -5418,21 +6085,13 @@ pub fn semantics_name(profile: &EngineProfile, command: u16) -> &'static str {
         Semantics::Variant(crate::profile::VariantId::FontCells) => "variant text override",
         Semantics::Variant(crate::profile::VariantId::Particles) => "variant particle override",
         Semantics::Variant(crate::profile::VariantId::Rain) => "variant rain streaks",
-        Semantics::Variant(crate::profile::VariantId::ParticlesX87) => {
-            "variant x87 particle override"
-        }
-        Semantics::Variant(crate::profile::VariantId::BackgroundAudio) => {
-            "variant background audio override"
-        }
-        Semantics::Variant(crate::profile::VariantId::FallingBillboards) => {
-            "variant falling billboard override"
-        }
-        Semantics::Variant(crate::profile::VariantId::CollisionParticles) => {
-            "variant collision particle override"
-        }
-        Semantics::Variant(crate::profile::VariantId::Fragments) => {
-            "variant image fragment override"
-        }
+        Semantics::Variant(crate::profile::VariantId::ParticlesX87) => "variant x87 particle override",
+        Semantics::Variant(crate::profile::VariantId::BackgroundAudio) => "variant background audio override",
+        Semantics::Variant(crate::profile::VariantId::FallingBillboards) => "variant falling billboard override",
+        Semantics::Variant(crate::profile::VariantId::FallingBillboardsX87) => "variant x87 falling billboard override",
+        Semantics::Variant(crate::profile::VariantId::CollisionParticles) => "variant collision particle override",
+        Semantics::Variant(crate::profile::VariantId::FadingParticles) => "variant fading particle override",
+        Semantics::Variant(crate::profile::VariantId::Fragments) => "variant image fragment override",
         Semantics::Variant(crate::profile::VariantId::SeRestart) => "variant SE restart",
         Semantics::Variant(crate::profile::VariantId::AudioPreload) => "variant audio preload",
         Semantics::Variant(crate::profile::VariantId::PolarPoint) => "variant integer polar point",
@@ -5453,7 +6112,7 @@ pub fn run(
     };
     let entry = match semantics {
         Semantics::Variant(id) => variant_entry(id, command),
-        Semantics::Root => ROOT.iter().find(|e| e.command == command),
+        Semantics::Root => root_entry(command),
     };
     let Some(entry) = entry else {
         return Ok((semantics != Semantics::Root).then_some(Flow::Unhandled));
@@ -5464,4 +6123,40 @@ pub fn run(
     (entry.handler)(hosts, &mut Call::new(vm, pc, command))
         .map(Some)
         .map_err(|cause| DispatchError { pc, command, cause })
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    #[test]
+    fn root_commands_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in ROOT {
+            assert!(seen.insert(entry.command), "{:#x} twice", entry.command);
+        }
+    }
+
+    #[test]
+    fn indexes_match_linear_scans_for_every_command() {
+        for command in 0..=u16::MAX {
+            let linear = ROOT.iter().find(|e| e.command == command);
+            assert_eq!(
+                root_entry(command).map(|e| e as *const Entry),
+                linear.map(|e| e as *const Entry),
+                "{command:#x}"
+            );
+            let all: Vec<_> = ROOT
+                .iter()
+                .chain(VARIANT_TABLES.iter().flat_map(|table| table.iter()))
+                .filter(|e| e.command == command)
+                .map(|e| e as *const Entry)
+                .collect();
+            let indexed: Vec<_> = entries_any_table(command)
+                .iter()
+                .map(|&e| e as *const Entry)
+                .collect();
+            assert_eq!(indexed, all, "{command:#x}");
+        }
+    }
 }

@@ -11,8 +11,14 @@ pub(crate) enum ChildSlots {
 }
 impl ChildSlots {
     pub(crate) fn for_profile(profile: &EngineProfile) -> Self {
-        // Independent x86 256-entry helpers: docs/games/asukimi.
-        if profile.is_inspected_20071117() || profile.is_inspected_20080903() {
+        // Independent x86 256-entry helpers: docs/games/{puriring,asukimi}.
+        if profile.is_inspected_20070119()
+            || profile.is_inspected_20071117()
+            || profile.is_inspected_20080903()
+            || profile.is_inspected_20090815()
+            || profile.is_inspected_20100314()
+            || profile.is_inspected_20101211()
+        {
             return Self::Slots256;
         }
         // Independent 512-entry create/destroy helpers: docs/games/kazokubu.
@@ -102,6 +108,7 @@ mod tests {
         assert!(!scene.allow_filter_mode_one);
         assert!(!scene.allow_legacy_sine_modes);
         for (id, count) in [
+            ("cmvs-20101211", 256),
             ("cmvs-20120309", 512),
             ("cmvs-20190305", 1024),
             ("cmvs-20190405", 1024),

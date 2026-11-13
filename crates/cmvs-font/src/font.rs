@@ -4,7 +4,7 @@ use crate::font_library::FontLibrary;
 use crate::glyph_cache::GlyphCache;
 use ab_glyph::{Font, FontVec, ScaleFont, point};
 use cmvs_core::{
-    FormatError,
+    FormatError, TextEncoding,
     camera::CameraHost,
     message::{AUXILIARY_TEXTS, MessageHost, RecordedGlyph, TEXT_OBJECTS},
     raster::RgbaImage,
@@ -25,21 +25,18 @@ const MAX_FONT: usize = 32 * 1024 * 1024;
 /// face; faces named by glyphs are resolved through `FontLibrary`.
 #[derive(Clone)]
 pub struct FontRenderer {
+    encoding: TextEncoding,
     library: Arc<Mutex<FontLibrary>>,
     cache: GlyphCache,
-    encoding: cmvs_core::text_encoding::TextEncoding,
 }
 
-struct PreviewMetrics(
-    Arc<Mutex<FontLibrary>>,
-    cmvs_core::text_encoding::TextEncoding,
-);
+struct PreviewMetrics(Arc<Mutex<FontLibrary>>, TextEncoding);
 impl PreviewMetrics {
     fn font(&self, face: &[u8], ch: char) -> Result<Arc<FontVec>, &'static str> {
         self.0
             .lock()
             .map_err(|_| "font library lock poisoned")
-            .map(|mut library| library.for_character(face, ch))
+            .map(|mut library| library.for_character(face, self.1, ch))
     }
 }
 impl std::fmt::Debug for PreviewMetrics {
@@ -48,6 +45,29 @@ impl std::fmt::Debug for PreviewMetrics {
     }
 }
 impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
+    fn display_face_name(&self, face: &[u8]) -> Option<Vec<u8>> {
+        if !face.starts_with(b"CMVS-U-") {
+            return None;
+        }
+        // Missing mappings and names outside the game's character set still get
+        // a readable label, without exposing a storage handle to the player.
+        let name = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|mut library| library.family_name(face, self.1).ok());
+        Some(
+            name.and_then(|name| {
+                if name.chars().any(|ch| ch as u32 > 0xffff) {
+                    return None;
+                }
+                let (bytes, _, bad) = codec(self.1).ok()?.encode(&name);
+                (!bad).then(|| bytes.into_owned())
+            })
+            .unwrap_or_else(|| b"Selected font".to_vec()),
+        )
+    }
+
     fn advance_width(
         &self,
         face: &[u8],
@@ -58,7 +78,7 @@ impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
         if !(1..=128).contains(&size) {
             return Err("glyph size outside 1..128 preview range");
         }
-        let ch = character_encoded(code, self.1).map_err(|e| e.0)?;
+        let ch = character(self.1, code).map_err(|e| e.0)?;
         let font = self.font(face, ch)?;
         let advance = font.as_scaled(size as f32).h_advance(font.glyph_id(ch));
         if !advance.is_finite() || advance < 0.0 || advance > u16::MAX as f32 {
@@ -84,7 +104,7 @@ impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
         if !(1..=128).contains(&size) {
             return Err("glyph size outside 1..128 preview range");
         }
-        let ch = character_encoded(code, self.1).map_err(|e| e.0)?;
+        let ch = character(self.1, code).map_err(|e| e.0)?;
         let font = self.font(face, ch)?;
         let id = font.glyph_id(ch);
         let scale = size as f32;
@@ -110,31 +130,42 @@ impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
     }
 }
 
-#[cfg(test)]
-fn character(code: u16) -> Result<char, FormatError> {
-    character_encoded(code, cmvs_core::text_encoding::TextEncoding::ShiftJis)
+// Keep backend codec selection here, outside core's dependency-free byte scanners.
+// New core encodings must be explicitly supported before rendering their glyphs.
+// Glyph codes and legacy font face names share this codec.
+pub(crate) fn codec(encoding: TextEncoding) -> Result<&'static encoding_rs::Encoding, FormatError> {
+    match encoding {
+        TextEncoding::ShiftJis => Ok(encoding_rs::SHIFT_JIS),
+        TextEncoding::Gbk => Ok(encoding_rs::GBK),
+        TextEncoding::Utf8 => Ok(encoding_rs::UTF_8),
+        _ => Err(FormatError("unsupported font text encoding")),
+    }
 }
-fn character_encoded(
-    code: u16,
-    encoding: cmvs_core::text_encoding::TextEncoding,
-) -> Result<char, FormatError> {
-    use cmvs_core::text_encoding::TextEncoding;
+
+fn character(encoding: TextEncoding, code: u16) -> Result<char, FormatError> {
+    // PKP translations use this formerly unassigned GBK cell for a music note.
     if encoding == TextEncoding::Gbk && code == 0xa2e1 {
         return Ok('♪');
     }
+    if encoding == TextEncoding::Utf8 {
+        // UTF-8 glyph codes are Unicode scalar values (see TextEncoding).
+        return char::from_u32(u32::from(code))
+            .filter(|&ch| ch != '\0')
+            .ok_or(FormatError("invalid UTF-8 glyph code"));
+    }
     let pair = code.to_be_bytes();
-    let bytes = if code <= 0x7f || code >= 0xff80 {
+    let bytes = if code <= 0x7f || (encoding == TextEncoding::ShiftJis && code >= 0xff80) {
         &pair[1..]
     } else {
         &pair[..]
     };
-    let decoder = match encoding {
-        TextEncoding::ShiftJis => encoding_rs::SHIFT_JIS,
-        TextEncoding::Gbk => encoding_rs::GBK,
-    };
-    let text = decoder
+    let text = codec(encoding)?
         .decode_without_bom_handling_and_without_replacement(bytes)
-        .ok_or(FormatError("invalid glyph code for selected text encoding"))?;
+        .ok_or(FormatError(match encoding {
+            TextEncoding::ShiftJis => "invalid Shift-JIS glyph code",
+            TextEncoding::Gbk => "invalid GBK glyph code",
+            _ => "invalid encoded glyph code",
+        }))?;
     let mut chars = text.chars();
     let ch = chars.next().ok_or(FormatError("empty glyph code"))?;
     if chars.next().is_some() || ch == '\0' {
@@ -256,21 +287,37 @@ impl FontRenderer {
         let font = FontVec::try_from_vec_and_index(bytes, face)
             .map_err(|_| FormatError("invalid OpenType font or collection face index"))?;
         Ok(Self {
+            encoding: TextEncoding::default(),
             library: Arc::new(Mutex::new(FontLibrary::new(Arc::new(font)))),
             cache: GlyphCache::default(),
-            encoding: Default::default(),
         })
+    }
+    /// Adds a font for characters the selected face and the default font lack.
+    pub fn add_fallback(&self, bytes: Vec<u8>, face: u32) -> Result<(), FormatError> {
+        if bytes.len() > MAX_FONT {
+            return Err(FormatError("font exceeds 32 MiB research limit"));
+        }
+        let font = FontVec::try_from_vec_and_index(bytes, face)
+            .map_err(|_| FormatError("invalid OpenType font or collection face index"))?;
+        self.library
+            .lock()
+            .map_err(|_| FormatError("font library lock poisoned"))?
+            .add_fallback(Arc::new(font));
+        Ok(())
     }
     /// Uses `library` (sharing its explicit default font) for every face.
     pub fn with_library(library: FontLibrary) -> Self {
         Self {
+            encoding: TextEncoding::default(),
             library: Arc::new(Mutex::new(library)),
             cache: GlyphCache::default(),
-            encoding: Default::default(),
         }
     }
-    /// Select the script overlay's byte encoding before rendering or creating metrics.
-    pub fn with_encoding(mut self, encoding: cmvs_core::text_encoding::TextEncoding) -> Self {
+    /// Select the game text encoding before installing this renderer's metrics.
+    /// It applies to glyph codes and to legacy font face names of this renderer
+    /// only; clones sharing the font library keep their own encoding. Changing it
+    /// discards cached glyph images; existing metrics retain their encoding.
+    pub fn with_text_encoding(mut self, encoding: TextEncoding) -> Self {
         self.encoding = encoding;
         self.cache = GlyphCache::default();
         self
@@ -284,7 +331,7 @@ impl FontRenderer {
     pub fn has_face(&self, face: &[u8]) -> bool {
         self.library
             .lock()
-            .is_ok_and(|mut library| library.contains(face))
+            .is_ok_and(|mut library| library.contains(face, self.encoding))
     }
     pub fn set_user_directory(&self, directory: &Path) -> Result<(), FormatError> {
         self.library
@@ -297,7 +344,7 @@ impl FontRenderer {
         self.library
             .lock()
             .map_err(|_| FormatError("font library lock poisoned"))?
-            .family_name(face)
+            .family_name(face, self.encoding)
     }
     pub fn select_unicode_face(&self, name: &str) -> Result<Vec<u8>, FormatError> {
         let mut library = self
@@ -305,7 +352,7 @@ impl FontRenderer {
             .lock()
             .map_err(|_| FormatError("font library lock poisoned"))?;
         let face = library.register_unicode(name)?;
-        library.face(&face)?;
+        library.face(&face, self.encoding)?;
         Ok(face)
     }
     pub fn import_font(&self, path: &Path, index: u32) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -313,6 +360,8 @@ impl FontRenderer {
         File::open(path)?
             .take(MAX_FONT as u64 + 1)
             .read_to_end(&mut bytes)?;
+        // An imported font is named in the game's face field only when it fits there.
+        let encoder = codec(self.encoding)?;
         let name = crate::font_library::family_names(path)?
             .into_iter()
             .find(|(face, _)| *face == index)
@@ -321,7 +370,7 @@ impl FontRenderer {
                     if name.chars().any(char::is_control) {
                         return None;
                     }
-                    let (encoded, _, unmappable) = encoding_rs::SHIFT_JIS.encode(&name);
+                    let (encoded, _, unmappable) = encoder.encode(&name);
                     (!unmappable
                         && !encoded.is_empty()
                         && encoded.len() <= 31
@@ -347,7 +396,7 @@ impl FontRenderer {
         self.library
             .lock()
             .map_err(|_| FormatError("font library lock poisoned"))
-            .map(|mut library| library.for_character(face, ch))
+            .map(|mut library| library.for_character(face, self.encoding, ch))
     }
     fn glyph(&mut self, glyph: &RecordedGlyph) -> Result<RgbaImage, FormatError> {
         if !(1..=128).contains(&glyph.size) {
@@ -374,7 +423,7 @@ impl FontRenderer {
         if let Some(image) = self.cache.get(&key) {
             return Ok(image.clone());
         }
-        let ch = character_encoded(glyph.code, self.encoding)?;
+        let ch = character(self.encoding, glyph.code)?;
         let font = self.font(&glyph.face, ch)?;
         let id = font.glyph_id(ch);
         let scale = glyph.size as f32;
@@ -447,26 +496,42 @@ impl FontRenderer {
             .filter_map(|i| messages.text(i))
             .filter(|t| t.visible && !t.glyphs.is_empty())
         {
-            if text.logical_size != messages.screen_size().map(|v| v as i32) {
-                return Err(FormatError(
-                    "font preview requires text coordinates matching the logical screen",
-                ));
-            }
             let scale = f32::from_bits(text.scale_bits);
             if !scale.is_finite() || scale < 0.0 {
                 return Err(FormatError(
                     "font preview requires finite nonnegative scale",
                 ));
             }
+            // A text created with its own logical size (NATSUUTA 0x211c) is drawn in that
+            // space; as for logically scaled scene objects, the device over logical width
+            // scales both axes, including the anchor. The scene's logical sizing applies
+            // it to the final vertices, so fractional device anchors are kept. Other
+            // builds keep refusing it.
+            let screen = messages.screen_size();
+            let logical_size = if text.logical_size == screen.map(|v| v as i32) {
+                [0, 0]
+            } else if !messages.allows_logical_text_scale() {
+                return Err(FormatError(
+                    "font preview requires text coordinates matching the logical screen",
+                ));
+            } else if text.logical_size[0] > 0 {
+                text.logical_size.map(|v| v as u32)
+            } else {
+                return Err(FormatError(
+                    "font preview requires a positive logical text width",
+                ));
+            };
             let mut parent_draw = DrawState::default();
             parent_draw.words[8..10].copy_from_slice(&text.position.map(|v| v as u32));
             parent_draw.words[10] = text.layer as u32;
-            parent_draw.words[18..20].fill(text.scale_bits);
+            parent_draw.words[18..20].fill(scale.to_bits());
             // The original text scene object owns attached glyph children. Scaling
             // acts on their relative positions and padded cells, not the text anchor.
+            // Glyph children inherit the parent's logical factor (flag bit 0).
             let mut parent = SceneObject {
                 draw: Some(parent_draw),
                 flags: 0xffff_ffff,
+                logical_size,
                 ..SceneObject::default()
             };
             for glyph in text.glyphs.iter().filter(|g| g.shown && g.opacity != 0) {
@@ -572,17 +637,45 @@ impl FontRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    #[ignore = "requires CMVS_FONT_PATH; synthetic glyphs and external font"]
-    fn bold_glyph_uses_a_distinct_cache_entry_and_increases_ink() {
+    #[ignore = "requires CMVS_FONT_PATH; external font"]
+    fn display_names_resolve_handles_in_the_game_encoding() {
         let path = std::env::var_os("CMVS_FONT_PATH").expect("CMVS_FONT_PATH");
-        let mut font = FontRenderer::read(Path::new(&path), 0).unwrap();
-        let mut glyph = RecordedGlyph {
+        let default = FontRenderer::read(Path::new(&path), 0).unwrap();
+        let shared = default.library.clone();
+        let mut library = shared.lock().unwrap();
+        let handle = library.register_unicode("Noto Sans CJK JP").unwrap();
+        let chinese = library.register_unicode("黑体").unwrap();
+        let unsupported = library.register_unicode("😀").unwrap();
+        drop(library);
+        let library = shared;
+        use cmvs_core::message::GlyphMetrics;
+        let metrics = PreviewMetrics(library.clone(), TextEncoding::Gbk);
+        assert_eq!(
+            metrics.display_face_name(&handle).unwrap(),
+            b"Noto Sans CJK JP"
+        );
+        assert_eq!(
+            metrics.display_face_name(&chinese).unwrap(),
+            encoding_rs::GBK.encode("黑体").0.as_ref()
+        );
+        assert_eq!(
+            metrics.display_face_name(&unsupported).unwrap(),
+            b"Selected font"
+        );
+        assert!(metrics.display_face_name(b"SimHei").is_none());
+        let utf8 = PreviewMetrics(library, TextEncoding::Utf8);
+        assert_eq!(utf8.display_face_name(&chinese).unwrap(), "黑体".as_bytes());
+    }
+
+    fn recorded_glyph(code: u16) -> RecordedGlyph {
+        RecordedGlyph {
             snapshot_indices: None,
             face: Arc::from(cmvs_core::settings::DEFAULT_FONT_FACE),
             bold: false,
             revision_alpha: false,
-            code: 0x82a0,
+            code,
             position: [0, 0],
             size: 27,
             colors: [0xffffff; 2],
@@ -596,7 +689,28 @@ mod tests {
             opacity: 255,
             reveal_mode: 0,
             reveal_width: 31,
-        };
+        }
+    }
+
+    #[test]
+    #[ignore = "requires CMVS_FONT_PATH; external font"]
+    fn clones_keep_their_own_face_encoding() {
+        let path = std::env::var_os("CMVS_FONT_PATH").expect("CMVS_FONT_PATH");
+        let sjis = FontRenderer::read(Path::new(&path), 0).unwrap();
+        let gbk = sjis.clone().with_text_encoding(TextEncoding::Gbk);
+        let name = encoding_rs::GBK.encode("黑体").0;
+        assert_eq!(gbk.family_name(&name).unwrap(), "黑体");
+        assert_ne!(sjis.family_name(&name).ok().as_deref(), Some("黑体"));
+        let meiryo = encoding_rs::SHIFT_JIS.encode("メイリオ").0;
+        assert_eq!(sjis.family_name(&meiryo).unwrap(), "メイリオ");
+    }
+
+    #[test]
+    #[ignore = "requires CMVS_FONT_PATH; synthetic glyphs and external font"]
+    fn bold_glyph_uses_a_distinct_cache_entry_and_increases_ink() {
+        let path = std::env::var_os("CMVS_FONT_PATH").expect("CMVS_FONT_PATH");
+        let mut font = FontRenderer::read(Path::new(&path), 0).unwrap();
+        let mut glyph = recorded_glyph(0x82a0);
         let normal = font.glyph(&glyph).unwrap();
         glyph.bold = true;
         let bold = font.glyph(&glyph).unwrap();
@@ -646,15 +760,37 @@ mod tests {
         // Keep one style hot while more than a cacheful of other colors is painted.
         // Sharing its original pixel allocation proves it was not rasterized again.
         let hot = font.glyph(&glyph).unwrap();
-        for color in 0..256 {
+        for color in 0..1024 {
             glyph.colors = [color; 2];
             font.glyph(&glyph).unwrap();
             glyph.colors = [0xffffff; 2];
             let hit = font.glyph(&glyph).unwrap();
             assert!(std::ptr::eq(hit.pixels(), hot.pixels()));
         }
-        assert_eq!(font.cache.len(), 128);
+        assert_eq!(font.cache.len(), 512);
     }
+
+    #[test]
+    #[ignore = "requires CMVS_FONT_PATH; synthetic full page and external font"]
+    fn repeated_full_page_reuses_styled_glyph_pixels() {
+        let path = std::env::var_os("CMVS_FONT_PATH").expect("CMVS_FONT_PATH");
+        let mut font = FontRenderer::read(Path::new(&path), 0).unwrap();
+        let mut glyph = recorded_glyph(u16::from(b'A'));
+        let originals: Vec<_> = (0..512)
+            .map(|color| {
+                glyph.colors = [color; 2];
+                font.glyph(&glyph).unwrap()
+            })
+            .collect();
+        for _ in 0..3 {
+            for (color, original) in originals.iter().enumerate() {
+                glyph.colors = [color as u32; 2];
+                let hit = font.glyph(&glyph).unwrap();
+                assert!(std::ptr::eq(hit.pixels(), original.pixels()));
+            }
+        }
+    }
+
     #[test]
     fn alpha_revision_preserves_endpoints_and_increases_partial_coverage() {
         assert_eq!(revise_alpha(0), 0);
@@ -676,15 +812,31 @@ mod tests {
     }
     #[test]
     fn glyph_codes_decode_strictly_including_sign_extended_halfwidth() {
-        assert_eq!(character(0x82a0).unwrap(), 'あ');
-        use cmvs_core::text_encoding::TextEncoding::Gbk;
-        assert_eq!(character_encoded(0xc4e3, Gbk).unwrap(), '你');
-        assert_eq!(character_encoded(0xd7ef, Gbk).unwrap(), '罪');
-        assert_eq!(character_encoded(0xa2e1, Gbk).unwrap(), '♪');
-        assert_eq!(character(0xffb1).unwrap(), 'ｱ');
-        assert_eq!(character(65).unwrap(), 'A');
-        assert!(character(0).is_err());
-        assert!(character(0x817f).is_err());
+        assert_eq!(character(TextEncoding::ShiftJis, 0x82a0).unwrap(), 'あ');
+        assert_eq!(character(TextEncoding::ShiftJis, 0xffb1).unwrap(), 'ｱ');
+        assert_eq!(character(TextEncoding::ShiftJis, 65).unwrap(), 'A');
+        assert!(character(TextEncoding::ShiftJis, 0).is_err());
+        assert!(character(TextEncoding::ShiftJis, 0x817f).is_err());
+    }
+    #[test]
+    fn gbk_glyph_codes_decode_without_changing_the_u16_model() {
+        assert_eq!(character(TextEncoding::Gbk, 0xa2e1).unwrap(), '♪');
+        assert_eq!(character(TextEncoding::Gbk, 0xd6d0).unwrap(), '中');
+        assert_eq!(character(TextEncoding::Gbk, 0xcec4).unwrap(), '文');
+        assert_eq!(character(TextEncoding::Gbk, 65).unwrap(), 'A');
+        assert!(character(TextEncoding::Gbk, 0).is_err());
+        assert!(character(TextEncoding::Gbk, 0x817f).is_err());
+        // A GBK pair remains two bytes even in the sign-extended SJIS range.
+        assert!(character(TextEncoding::Gbk, 0xffb1).is_err());
+    }
+
+    #[test]
+    fn utf8_glyph_codes_are_unicode_scalars() {
+        assert_eq!(character(TextEncoding::Utf8, 0x3042).unwrap(), 'あ');
+        assert_eq!(character(TextEncoding::Utf8, 0x00e9).unwrap(), 'é');
+        assert_eq!(character(TextEncoding::Utf8, 65).unwrap(), 'A');
+        assert!(character(TextEncoding::Utf8, 0).is_err());
+        assert!(character(TextEncoding::Utf8, 0xd800).is_err());
     }
     #[test]
     fn synthetic_mask_has_transparent_padding_and_a_one_pixel_outline() {
