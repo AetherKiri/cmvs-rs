@@ -224,7 +224,7 @@ fn run(args: Args) -> Result<bool, String> {
                 cmvs_core::patch::text_encoding(&args.root).map_err(|e| e.to_string())?;
             let font = FontRenderer::read(path, *index)
                 .map_err(|e| e.to_string())?
-                .with_encoding(encoding);
+                .with_text_encoding(encoding);
             target.capabilities.insert(cap::FONT);
             Some(font)
         }

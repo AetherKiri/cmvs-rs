@@ -9,7 +9,12 @@ use bytecode::{command, pending, script};
 #[test]
 fn inspected_old_builds_use_their_window_size_schema_only_for_their_binary() {
     use cmvs_rs::{profile::Registry, settings::Configuration};
-    for id in ["cmvs-20071117", "cmvs-20080719", "cmvs-20080903"] {
+    for id in [
+        "cmvs-20071117",
+        "cmvs-20080719",
+        "cmvs-20080903",
+        "cmvs-20090815",
+    ] {
         let profile = Registry::builtin().profile(id).unwrap();
         for (ini, expected) in [
             ("", [800, 600]),
@@ -654,6 +659,50 @@ fn font_name_query_writes_the_bank_and_preserves_other_results() {
 }
 
 #[test]
+fn gbk_font_query_transcodes_only_the_legacy_default_name() {
+    let mut code = vec![];
+    command(&mut code, 0x22de, &[0, 0x8000_0000]);
+    let script = script(&code);
+    for face in [DEFAULT_FONT_FACE, b"\xba\xda\xcc\xe5".as_slice(), b"SimHei"] {
+        let mut vm = Machine::new_with_encoding(&script, cmvs_rs::TextEncoding::Gbk).unwrap();
+        let mut settings = SettingsHost::default();
+        settings.set_font_face(face).unwrap();
+        pending(&mut vm);
+        settings.try_handle(&mut vm).unwrap();
+        let expected = if face == DEFAULT_FONT_FACE {
+            b"\xa3\xcd\xa3\xd3 \xa5\xb4\xa5\xb7\xa5\xc3\xa5\xaf".as_slice()
+        } else {
+            face
+        };
+        assert_eq!(vm.resolve_string(0x8000_0000).unwrap(), expected);
+        assert_eq!(settings.font_face(), face);
+        assert_eq!(vm.state().system_integer(0), Some(1));
+        assert_eq!(vm.stack().len_bytes(), 0);
+    }
+}
+
+#[test]
+fn utf8_font_query_returns_the_default_name_in_utf8() {
+    let mut code = vec![];
+    command(&mut code, 0x22de, &[0, 0x8000_0000]);
+    let script = script(&code);
+    for face in [DEFAULT_FONT_FACE, "微软雅黑".as_bytes()] {
+        let mut vm = Machine::new_with_encoding(&script, cmvs_rs::TextEncoding::Utf8).unwrap();
+        let mut settings = SettingsHost::default();
+        settings.set_font_face(face).unwrap();
+        pending(&mut vm);
+        settings.try_handle(&mut vm).unwrap();
+        let expected = if face == DEFAULT_FONT_FACE {
+            "ＭＳ ゴシック".as_bytes()
+        } else {
+            face
+        };
+        assert_eq!(vm.resolve_string(0x8000_0000).unwrap(), expected);
+        assert_eq!(settings.font_face(), face);
+    }
+}
+
+#[test]
 fn font_writes_set_the_global_face_and_invalid_names_or_destinations_stay_pending() {
     let mut code = vec![];
     command(&mut code, 0x22de, &[1, 0x8000_0000]);
@@ -967,4 +1016,90 @@ fn realive_alpha_revision_round_trips_and_preserves_pending_errors() {
             before
         );
     }
+}
+
+#[test]
+fn font_query_displays_resolved_name_without_changing_saved_handle() {
+    use cmvs_rs::{
+        dispatch::{self, Hosts},
+        message::{GlyphMetrics, MessageHost},
+        profile::Semantics,
+    };
+    #[derive(Debug)]
+    struct Names;
+    impl GlyphMetrics for Names {
+        fn display_face_name(&self, _: &[u8]) -> Option<Vec<u8>> {
+            Some(b"Noto Sans CJK JP".to_vec())
+        }
+        fn ink_width(&self, _: &[u8], _: u16, _: u32) -> Result<u32, &'static str> {
+            Ok(0)
+        }
+    }
+    let mut code = vec![];
+    command(&mut code, 0x22de, &[0, 0x8000_0000]);
+    let script = script(&code);
+    let mut vm = Machine::new(&script).unwrap();
+    let handle = b"CMVS-U-d81744e917b92a4040af787f";
+    let mut settings = SettingsHost::default();
+    settings.set_font_face(handle).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_glyph_metrics(Box::new(Names));
+    pending(&mut vm);
+    dispatch::run(
+        Semantics::Root,
+        &mut vm,
+        &mut Hosts {
+            settings: Some(&mut settings),
+            messages: Some(&mut messages),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(vm.resolve_string(0x8000_0000).unwrap(), b"Noto Sans CJK JP");
+    assert_eq!(settings.font_face(), handle);
+    assert_eq!(vm.state().system_integer(0), Some(1));
+}
+
+#[test]
+fn font_query_receives_the_message_host_the_runner_selects() {
+    use cmvs_rs::{
+        dispatch::{self, Hosts},
+        message::{GlyphMetrics, MessageHost},
+        profile::Semantics,
+    };
+    #[derive(Debug)]
+    struct Names;
+    impl GlyphMetrics for Names {
+        fn display_face_name(&self, _: &[u8]) -> Option<Vec<u8>> {
+            Some(b"Noto Sans CJK SC".to_vec())
+        }
+        fn ink_width(&self, _: &[u8], _: u16, _: u32) -> Result<u32, &'static str> {
+            Ok(0)
+        }
+    }
+    let mut code = vec![];
+    command(&mut code, 0x22de, &[0, 0x8000_0000]);
+    let script = script(&code);
+    let mut vm = Machine::new(&script).unwrap();
+    let handle = b"CMVS-U-d53487014105749eb7f8718c";
+    let mut settings = SettingsHost::default();
+    settings.set_font_face(handle).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_glyph_metrics(Box::new(Names));
+    pending(&mut vm);
+    // The runner lends the message host as `hosts.messages` only when this holds;
+    // otherwise the settings page leaks the storage handle instead of the name.
+    assert!(dispatch::uses_message_state(vm.pending_system().unwrap().1));
+    dispatch::run(
+        Semantics::Root,
+        &mut vm,
+        &mut Hosts {
+            settings: Some(&mut settings),
+            messages: Some(&mut messages),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(vm.resolve_string(0x8000_0000).unwrap(), b"Noto Sans CJK SC");
+    assert_eq!(settings.font_face(), handle);
 }

@@ -8,42 +8,58 @@
 
 <table>
   <tr>
-    <th colspan="3">Amatsutsumi</th>
+    <th colspan="2">Amatsutsumi</th>
   </tr>
   <tr>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/amatsutsumi_windows11.webp" alt="Windows Example of Amatsutsumi" width="100%">
     </td>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/amatsutsumi_ubuntu.webp" alt="Linux Example of Amatsutsumi" width="100%">
     </td>
-    <td align="center" width="33%">
+  </tr>
+  <tr>
+    <td align="center"><strong>Windows</strong></td>
+    <td align="center"><strong>Linux</strong></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
       <img src="docs/images/amatsutsumi_android.webp" alt="Android Example of Amatsutsumi" width="100%">
     </td>
+    <td align="center" width="50%">
+      <img src="docs/images/amatsutsumi_switch.webp" alt="Switch (Ryujinx) Example of Amatsutsumi" width="100%">
+    </td>
   </tr>
   <tr>
-    <td align="center"><strong>Windows</strong></td>
-    <td align="center"><strong>Linux</strong></td>
     <td align="center"><strong>Android</strong></td>
+    <td align="center"><strong>Switch (Ryujinx)</strong></td>
   </tr>
   <tr>
-    <th colspan="3">Aoitori</th>
+    <th colspan="2">Aoitori</th>
   </tr>
   <tr>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/aoitori_windows11.webp" alt="Windows Example of Aoitori" width="100%">
     </td>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/aoitori_ubuntu.webp" alt="Linux Example of Aoitori" width="100%">
-    </td>
-    <td align="center" width="33%">
-      <img src="docs/images/aoitori_android.webp" alt="Android Example of Aoitori" width="100%">
     </td>
   </tr>
   <tr>
     <td align="center"><strong>Windows</strong></td>
     <td align="center"><strong>Linux</strong></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/images/aoitori_android.webp" alt="Android Example of Aoitori" width="100%">
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/aoitori_switch.webp" alt="Switch (Ryujinx) Example of Aoitori" width="100%">
+    </td>
+  </tr>
+  <tr>
     <td align="center"><strong>Android</strong></td>
+    <td align="center"><strong>Switch (Ryujinx)</strong></td>
   </tr>
 </table>
 
@@ -58,12 +74,25 @@ cargo test --offline
 
 桌面预览、启动快照屏障、字体、音频和独立用户目录配置见[运行指南](docs/guides/running.md)。检查工具见[CLI 指南](docs/guides/cli.md)。
 
-## 当前状态
+## 汉化补丁支持
 
-能力、游戏验证范围与主要缺口见[当前状态](docs/status.md)；全部样本见[游戏档案目录](docs/games/README.md)。
+请使用 [补丁转换工具](./tools/fan_patch/README.md) 自行转换汉化补丁为 cmvs-rs 标准封包，默认不提供汉化补丁支持。
+
+## 支持平台
+
+| Platform | Target |
+|---|---|
+| Windows / Linux / MacOS | Host |
+| iOS | aarch64-apple-ios |
+| Android | aarch64-linux-android, x86_64-linux-android |
+| Web | wasm32-unknown-unknown |
+| Switch | aarch64-switch |
+| PS Vita | armv7-sony-vita-newlibeabihf |
 
 ## 文档与开发
 
+- [当前状态](docs/status.md)
+- [游戏档案目录](docs/games/README.md)
 - [文档导航与归档规则](docs/README.md)：按用途查找资料。
 - [架构](docs/architecture.md)与 [Workspace](docs/workspace.md)：模块职责、依赖和完整检查命令。
 - [研究约定](docs/research.md)：证据要求及新游戏接入步骤。

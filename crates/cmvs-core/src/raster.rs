@@ -3,13 +3,13 @@
 use crate::{FormatError, MAX_PAYLOAD};
 use std::sync::{Arc, OnceLock};
 
-#[derive(Debug)]
 struct ImageData {
     pixels: Vec<u8>,
-    content_digest: OnceLock<[u8; 32]>,
+    content_digest: OnceLock<u128>,
+    opaque: OnceLock<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RgbaImage {
     width: u32,
     height: u32,
@@ -23,11 +23,25 @@ pub struct RgbaImage {
 /// How a texture cache recognizes an image without comparing pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CacheKey {
-    /// Equal pixel content and dimensions share one texture.
-    Content([u8; 32], u32, u32),
+    /// Equal pixel content and dimensions share one texture. The hash is 128 bits of
+    /// [`content_hash`], not a cryptographic digest: images are not adversarial here.
+    /// Decoded image files carry a hash of what they were decoded from instead.
+    Content(u128, u32, u32),
     /// One decoded movie frame and its clones. Hashing it would cost more than the
     /// decode, and no other image shares its content.
     Frame(u64),
+}
+/// Omits the lazily cached digest and the process-unique frame identity, so equal state
+/// formats identically across runs in one process.
+impl std::fmt::Debug for RgbaImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RgbaImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("pixels", &self.data.pixels)
+            .field("movie_frame", &self.frame.is_some())
+            .finish()
+    }
 }
 impl PartialEq for RgbaImage {
     fn eq(&self, other: &Self) -> bool {
@@ -36,11 +50,24 @@ impl PartialEq for RgbaImage {
 }
 impl Eq for RgbaImage {}
 impl RgbaImage {
-    /// Lazily hashes immutable pixels once. Cache state is not part of image equality.
-    pub fn content_digest(&self) -> &[u8; 32] {
-        self.data
+    /// Lazily hashes immutable pixels once, unless the image was identified by its
+    /// source. Cache state is not part of image equality.
+    pub fn content_digest(&self) -> u128 {
+        *self
+            .data
             .content_digest
-            .get_or_init(|| crate::digest::sha256(self.pixels()))
+            .get_or_init(|| content_hash(self.pixels()))
+    }
+
+    /// Stands in for the content hash with one derived from `identity`, which must
+    /// determine the pixels: the identity of the bytes an image was decoded from. Saves
+    /// hashing the decoded pixels, which are many times larger. Images with equal pixels
+    /// but different identities then no longer share a texture. Has no effect once the
+    /// digest exists.
+    pub(crate) fn identify_content(&self, identity: u128) {
+        let mut tagged = *b"decoded image\0\0\0################";
+        tagged[16..].copy_from_slice(&identity.to_le_bytes());
+        let _ = self.data.content_digest.set(content_hash(&tagged));
     }
 
     /// Marks a decoded movie frame with an identity unique within the process.
@@ -59,7 +86,7 @@ impl RgbaImage {
     pub fn cache_key(&self) -> CacheKey {
         match self.frame {
             Some(frame) => CacheKey::Frame(frame),
-            None => CacheKey::Content(*self.content_digest(), self.width, self.height),
+            None => CacheKey::Content(self.content_digest(), self.width, self.height),
         }
     }
 
@@ -76,6 +103,7 @@ impl RgbaImage {
             data: Arc::new(ImageData {
                 pixels,
                 content_digest: OnceLock::new(),
+                opaque: OnceLock::new(),
             }),
             frame: None,
         })
@@ -88,6 +116,13 @@ impl RgbaImage {
     }
     pub fn pixels(&self) -> &[u8] {
         &self.data.pixels
+    }
+    /// Shared immutable pixels need at most one alpha scan, including across clones.
+    pub(crate) fn is_opaque(&self) -> bool {
+        *self
+            .data
+            .opaque
+            .get_or_init(|| self.pixels().as_chunks::<4>().0.iter().all(|p| p[3] == 255))
     }
     /// Nearest-neighbor, centered aspect fit over 0x00RRGGBB; not CMVS scene blending.
     pub fn draw_fit(&self, target: &mut [u32], width: u32, height: u32) -> Result<(), FormatError> {
@@ -150,6 +185,29 @@ impl RgbaImage {
         }
         let xs = view.left.max(0)..(view.left + i64::from(view.width)).min(i64::from(width));
         let ys = view.top.max(0)..(view.top + i64::from(view.height)).min(i64::from(height));
+        let opaque = self.is_opaque();
+        if view.width == self.width && view.height == self.height {
+            // Both filters sample exact texels at native size, including centered
+            // views and cropped cover modes. Avoid coordinate division and four taps.
+            let columns = (xs.end - xs.start) as usize;
+            let source_x = (xs.start - view.left) as usize;
+            for y in ys {
+                let source = ((y - view.top) as usize * self.width as usize + source_x) * 4;
+                let target_at = y as usize * width as usize + xs.start as usize;
+                let source = &self.pixels()[source..source + columns * 4];
+                let target = &mut target[target_at..target_at + columns];
+                if opaque {
+                    for (target, pixel) in target.iter_mut().zip(source.as_chunks::<4>().0) {
+                        *target = rgb(*pixel);
+                    }
+                } else {
+                    for (target, pixel) in target.iter_mut().zip(source.as_chunks::<4>().0) {
+                        composite(target, *pixel);
+                    }
+                }
+            }
+            return Ok(());
+        }
         if linear {
             // Per-axis source pair and weight for each target column/row in view.
             let taps = |range: std::ops::Range<i64>, origin: i64, span: u32, source: u32| {
@@ -167,6 +225,47 @@ impl RgbaImage {
             let columns = taps(xs.clone(), view.left, view.width, self.width);
             let rows = taps(ys.clone(), view.top, view.height, self.height);
             let stride = self.width as usize;
+            if opaque {
+                // Adjacent output rows often share source rows. Keep horizontal
+                // RGB sums at 8-bit fractional precision and round only at output.
+                let mut first = vec![[0u32; 3]; columns.len()];
+                let mut second = first.clone();
+                let (mut first_y, mut second_y) = (None, None);
+                let sample_row = |y: usize, row: &mut [[u32; 3]]| {
+                    let source = self.pixels()[y * stride * 4..][..stride * 4]
+                        .as_chunks::<4>()
+                        .0;
+                    for (out, &(x0, x1, fx)) in row.iter_mut().zip(&columns) {
+                        let (a, b, fx) = (source[x0], source[x1], fx as u32);
+                        *out = std::array::from_fn(|c| {
+                            u32::from(a[c]) * (256 - fx) + u32::from(b[c]) * fx
+                        });
+                    }
+                };
+                for (y, &(y0, y1, fy)) in ys.zip(&rows) {
+                    if second_y == Some(y0) {
+                        std::mem::swap(&mut first, &mut second);
+                        std::mem::swap(&mut first_y, &mut second_y);
+                    }
+                    if first_y != Some(y0) {
+                        sample_row(y0, &mut first);
+                        first_y = Some(y0);
+                    }
+                    if y1 != y0 && second_y != Some(y1) {
+                        sample_row(y1, &mut second);
+                        second_y = Some(y1);
+                    }
+                    let below = if y0 == y1 { &first } else { &second };
+                    let fy = fy as u32;
+                    let target_at = y as usize * width as usize + xs.start as usize;
+                    let target = &mut target[target_at..target_at + columns.len()];
+                    for ((target, a), b) in target.iter_mut().zip(&first).zip(below) {
+                        let channel = |c| (a[c] * (256 - fy) + b[c] * fy + 32768) >> 16;
+                        *target = channel(0) << 16 | channel(1) << 8 | channel(2);
+                    }
+                }
+                return Ok(());
+            }
             for (y, &(y0, y1, fy)) in ys.zip(&rows) {
                 for (x, &(x0, x1, fx)) in xs.clone().zip(&columns) {
                     let weights = [
@@ -193,6 +292,29 @@ impl RgbaImage {
                             << shift
                     };
                     *dst = channel(0, 16) | channel(1, 8) | channel(2, 0);
+                }
+            }
+            return Ok(());
+        }
+        if opaque {
+            let columns: Vec<_> = xs
+                .clone()
+                .map(|x| {
+                    ((x - view.left) as u64 * u64::from(self.width) / u64::from(view.width))
+                        as usize
+                })
+                .collect();
+            for y in ys {
+                let source_y =
+                    (y - view.top) as u64 * u64::from(self.height) / u64::from(view.height);
+                let source_at = source_y as usize * self.width as usize * 4;
+                let source = self.pixels()[source_at..][..self.width as usize * 4]
+                    .as_chunks::<4>()
+                    .0;
+                let target_at = y as usize * width as usize + xs.start as usize;
+                let target = &mut target[target_at..target_at + columns.len()];
+                for (target, &source_x) in target.iter_mut().zip(&columns) {
+                    *target = rgb(source[source_x]);
                 }
             }
             return Ok(());
@@ -256,6 +378,19 @@ impl RgbaImage {
     }
 }
 
+fn rgb([r, g, b, _]: [u8; 4]) -> u32 {
+    u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+}
+
+fn composite(target: &mut u32, pixel: [u8; 4]) {
+    let alpha = u32::from(pixel[3]);
+    let channel = |i: usize, shift: u32| {
+        ((u32::from(pixel[i]) * alpha + ((*target >> shift) & 255) * (255 - alpha) + 127) / 255)
+            << shift
+    };
+    *target = channel(0, 16) | channel(1, 8) | channel(2, 0);
+}
+
 /// CRC-32 (ISO-HDLC, reflected 0xEDB88320) as PNG chunks require.
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut table = [0u32; 256];
@@ -289,9 +424,64 @@ pub fn adler32(bytes: &[u8]) -> u32 {
     (b << 16) | a
 }
 
+/// Texture-cache identity of pixel content: four independent lanes of folded 64x64-bit
+/// multiplies over 64-byte stripes (the wyhash construction), finished with the length.
+/// A software SHA-256 cost more than decoding the image on console CPUs.
+pub fn content_hash(bytes: &[u8]) -> u128 {
+    const K: [u64; 6] = [
+        0xa076_1d64_78bd_642f,
+        0xe703_7ed1_a0b4_28db,
+        0x8ebc_6af0_9c88_c6e3,
+        0x5899_65cc_7537_4cc3,
+        0x1d8e_4e27_c47d_124f,
+        0x9e37_79b9_7f4a_7c15,
+    ];
+    #[inline(always)]
+    fn fold(a: u64, b: u64) -> u64 {
+        let m = u128::from(a) * u128::from(b);
+        (m as u64) ^ (m >> 64) as u64
+    }
+    #[inline(always)]
+    fn stripe(lanes: &mut [u64; 4], stripe: &[u8; 64]) {
+        for (i, lane) in lanes.iter_mut().enumerate() {
+            let a = u64::from_le_bytes(stripe[i * 16..i * 16 + 8].try_into().unwrap());
+            let b = u64::from_le_bytes(stripe[i * 16 + 8..i * 16 + 16].try_into().unwrap());
+            *lane = fold(a ^ *lane, b ^ K[i]);
+        }
+    }
+    let length = bytes.len() as u64;
+    let mut lanes = [K[0] ^ length, K[1], K[2], K[3]];
+    let (stripes, tail) = bytes.as_chunks::<64>();
+    for chunk in stripes {
+        stripe(&mut lanes, chunk);
+    }
+    let mut last = [0u8; 64];
+    last[..tail.len()].copy_from_slice(tail);
+    stripe(&mut lanes, &last);
+    let low = fold(lanes[0] ^ K[4], lanes[1] ^ length);
+    let high = fold(lanes[2] ^ K[5], lanes[3] ^ length.rotate_left(32));
+    let low = fold(low ^ K[0], high ^ K[1]) ^ low;
+    let high = fold(high ^ K[2], low ^ K[3]) ^ high;
+    u128::from(low) | u128::from(high) << 64
+}
+
 #[cfg(test)]
 mod content_digest_tests {
     use super::*;
+    #[test]
+    fn clones_share_alpha_classification_without_changing_image_identity() {
+        for alpha in [0, 254, 255] {
+            let image = RgbaImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, alpha]).unwrap();
+            let clone = image.clone();
+            let key = image.cache_key();
+            assert!(image.data.opaque.get().is_none());
+            assert_eq!(clone.is_opaque(), alpha == 255);
+            assert_eq!(image.data.opaque.get(), Some(&(alpha == 255)));
+            assert_eq!(image.cache_key(), key);
+            assert_eq!(image, clone);
+        }
+    }
+
     #[test]
     fn temporary_clones_share_pixels_and_initialize_the_cached_digest() {
         let cached = RgbaImage::new(1, 1, vec![1, 2, 3, 4]).unwrap();
@@ -302,32 +492,74 @@ mod content_digest_tests {
         drop(prepared);
         assert_eq!(
             cached.data.content_digest.get(),
-            Some(&crate::digest::sha256(cached.pixels()))
+            Some(&content_hash(cached.pixels()))
         );
         assert_eq!(cached.clone().cache_key(), key);
         assert_eq!(cached, RgbaImage::new(1, 1, vec![1, 2, 3, 4]).unwrap());
     }
 
     #[test]
+    fn a_source_identity_stands_in_for_the_pixel_hash_until_one_exists() {
+        let image = RgbaImage::new(1, 1, vec![1, 2, 3, 4]).unwrap();
+        let other = image.clone();
+        image.identify_content(7);
+        let key = image.content_digest();
+        assert_ne!(key, content_hash(image.pixels()));
+        // Clones share it, a later identity does not replace it, and it is stable.
+        other.identify_content(8);
+        assert_eq!(other.content_digest(), key);
+        let same = RgbaImage::new(1, 1, vec![9; 4]).unwrap();
+        same.identify_content(7);
+        assert_eq!(same.content_digest(), key);
+        let different = RgbaImage::new(1, 1, vec![1, 2, 3, 4]).unwrap();
+        different.identify_content(8);
+        assert_ne!(different.content_digest(), key);
+        // An image already hashed keeps its pixel hash.
+        let hashed = RgbaImage::new(1, 1, vec![1, 2, 3, 4]).unwrap();
+        let pixels = hashed.content_digest();
+        hashed.identify_content(7);
+        assert_eq!(hashed.content_digest(), pixels);
+        assert_eq!(image, hashed);
+    }
+
+    #[test]
     fn digest_cache_does_not_change_equality_and_tracks_pixel_content() {
         let first = RgbaImage::new(1, 1, vec![1, 2, 3, 4]).unwrap();
         let second = first.clone();
-        assert_eq!(
-            first.content_digest(),
-            &crate::digest::sha256(first.pixels())
-        );
+        assert_eq!(first.content_digest(), content_hash(first.pixels()));
         assert_eq!(first, second);
         assert_eq!(first, first.clone());
         let changed = RgbaImage::new(1, 1, vec![1, 2, 3, 5]).unwrap();
         assert_ne!(first.content_digest(), changed.content_digest());
     }
     #[test]
+    fn content_hash_depends_on_every_byte_and_on_the_length() {
+        let mut seen = std::collections::HashMap::new();
+        let mut check = |bytes: Vec<u8>| {
+            let hash = content_hash(&bytes);
+            let first = seen.entry(hash).or_insert_with(|| bytes.clone());
+            assert_eq!(*first, bytes, "different inputs share {hash:#x}");
+        };
+        for length in 0..200usize {
+            let bytes: Vec<u8> = (0..length).map(|i| (i * 7 + 3) as u8).collect();
+            // Trailing zeros are padding inside the last stripe; the length tells them apart.
+            check([bytes.as_slice(), &[0]].concat());
+            for at in 0..length {
+                let mut flipped = bytes.clone();
+                flipped[at] ^= 1;
+                check(flipped);
+            }
+            check(bytes);
+        }
+    }
+
+    #[test]
     fn frames_have_their_own_identity_and_keep_it_when_cloned() {
         let image = RgbaImage::new(1, 1, vec![1, 2, 3, 4]).unwrap();
         let content = image.cache_key();
         assert_eq!(
             content,
-            CacheKey::Content(crate::digest::sha256(image.pixels()), 1, 1)
+            CacheKey::Content(content_hash(image.pixels()), 1, 1)
         );
         let first = image.clone().into_frame();
         let second = image.into_frame();

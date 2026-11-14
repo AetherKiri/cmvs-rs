@@ -88,7 +88,10 @@ engine_result_t Open(void* p, const char* path, const char* startup) {
         for (unsigned char b : root) { hash ^= b; hash *= 1099511628211ull; }
         char name[17]; std::snprintf(name, sizeof(name), "%016llx", static_cast<unsigned long long>(hash));
         auto user = (std::filesystem::path(r.writable) / "cmvs" / name).string();
-        const auto result = r.result(cmvs_host_open_game_savedata(r.core, root.c_str(), user.c_str(), r.font.c_str(), r.native_audio));
+        auto result = r.result(cmvs_host_open_game_savedata(r.core, root.c_str(), user.c_str(), r.font.c_str(), r.native_audio));
+        // Opening from Aether's library starts a new session. Some games would
+        // otherwise reload their automatic resume slot even in a fresh VM.
+        if (result == ENGINE_RESULT_OK) result = r.result(cmvs_host_skip_auto_resume(r.core));
         r.opened = result == ENGINE_RESULT_OK;
         return result;
     } catch (const std::exception& e) { r.error = e.what(); return ENGINE_RESULT_IO_ERROR; }

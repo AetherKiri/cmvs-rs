@@ -1,8 +1,10 @@
 //! Aoitori 0x23b9/0x23bb: byte/pixel counts, with a temporary pen and committed scratch.
 //! Executable-bound evidence: docs/games/aoitori/vm-semantics.md.
 use super::{GlyphMetrics, auxiliary::AuxiliaryText, output::parse_group};
+use crate::TextEncoding;
 
 struct Cursor<'a> {
+    encoding: TextEncoding,
     group: &'a AuxiliaryText,
     x: f32,
     lines: u32,
@@ -15,7 +17,7 @@ impl Cursor<'_> {
     fn wrap(&mut self, code: u16, simple: bool) -> Result<(), &'static str> {
         if self
             .group
-            .wraps_font_cells(self.x, code, simple, &mut self.scratch)?
+            .wraps_font_cells(self.encoding, self.x, code, simple, &mut self.scratch)?
         {
             self.lines += 1;
             if self.lines >= 32 {
@@ -41,6 +43,7 @@ impl Cursor<'_> {
 impl AuxiliaryText {
     pub(super) fn measure_font_cells(
         &self,
+        encoding: TextEncoding,
         bytes: &[u8],
         pixels: bool,
         proportional: bool,
@@ -59,7 +62,7 @@ impl AuxiliaryText {
                 metrics
                     .ok_or("proportional text requires a font metrics backend")?
                     .advance_width(&self.face, code, raster_size, false)?
-            } else if code > 0xff && code < 0xff80 {
+            } else if encoding.is_wide_code(code) {
                 raster_size
             } else {
                 metrics
@@ -79,6 +82,7 @@ impl AuxiliaryText {
             Ok(width as f32)
         };
         let mut state = Cursor {
+            encoding,
             group: self,
             x: self.float_font_cells(176),
             lines: 0,
@@ -126,21 +130,19 @@ impl AuxiliaryText {
                     _ => return Err("unknown or truncated auxiliary measurement escape"),
                 }
             } else if first == b'{' {
-                let group = parse_group(bytes, i + 1, self.encoding)?;
+                let group = parse_group(encoding, bytes, i + 1)?;
                 state.wrap(0, true)?;
                 for code in group.base.into_iter().flatten() {
                     add(&mut state, code, true)?;
                 }
                 i = group.end;
             } else {
-                let wide = self.encoding.is_lead(first);
-                let code = if wide {
-                    let second = *bytes
-                        .get(i + 1)
-                        .filter(|&&b| b != 0)
-                        .ok_or("truncated double-byte auxiliary character")?;
-                    i += 2;
-                    u16::from_be_bytes([first, second])
+                let character =
+                    encoding.wide_at(bytes, i, "truncated double-byte auxiliary character")?;
+                let wide = character.is_some();
+                let code = if let Some((code, len)) = character {
+                    i += len;
+                    code
                 } else {
                     i += 1;
                     first as i8 as i16 as u16

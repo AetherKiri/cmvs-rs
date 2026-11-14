@@ -8,42 +8,58 @@ A **Rust** reimplementation of Purple SOFTWARE's CMVS engine.
 
 <table>
   <tr>
-    <th colspan="3">Amatsutsumi</th>
+    <th colspan="2">Amatsutsumi</th>
   </tr>
   <tr>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/amatsutsumi_windows11.webp" alt="Windows Example of Amatsutsumi" width="100%">
     </td>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/amatsutsumi_ubuntu.webp" alt="Linux Example of Amatsutsumi" width="100%">
     </td>
-    <td align="center" width="33%">
+  </tr>
+  <tr>
+    <td align="center"><strong>Windows</strong></td>
+    <td align="center"><strong>Linux</strong></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
       <img src="docs/images/amatsutsumi_android.webp" alt="Android Example of Amatsutsumi" width="100%">
     </td>
+    <td align="center" width="50%">
+      <img src="docs/images/amatsutsumi_switch.webp" alt="Switch (Ryujinx) Example of Amatsutsumi" width="100%">
+    </td>
   </tr>
   <tr>
-    <td align="center"><strong>Windows</strong></td>
-    <td align="center"><strong>Linux</strong></td>
     <td align="center"><strong>Android</strong></td>
+    <td align="center"><strong>Switch (Ryujinx)</strong></td>
   </tr>
   <tr>
-    <th colspan="3">Aoitori</th>
+    <th colspan="2">Aoitori</th>
   </tr>
   <tr>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/aoitori_windows11.webp" alt="Windows Example of Aoitori" width="100%">
     </td>
-    <td align="center" width="33%">
+    <td align="center" width="50%">
       <img src="docs/images/aoitori_ubuntu.webp" alt="Linux Example of Aoitori" width="100%">
-    </td>
-    <td align="center" width="33%">
-      <img src="docs/images/aoitori_android.webp" alt="Android Example of Aoitori" width="100%">
     </td>
   </tr>
   <tr>
     <td align="center"><strong>Windows</strong></td>
     <td align="center"><strong>Linux</strong></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/images/aoitori_android.webp" alt="Android Example of Aoitori" width="100%">
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/images/aoitori_switch.webp" alt="Switch (Ryujinx) Example of Aoitori" width="100%">
+    </td>
+  </tr>
+  <tr>
     <td align="center"><strong>Android</strong></td>
+    <td align="center"><strong>Switch (Ryujinx)</strong></td>
   </tr>
 </table>
 
@@ -58,12 +74,21 @@ cargo test --offline
 
 See the [Running Guide](docs/guides/running.md) for desktop previews, startup snapshot barriers, fonts, audio, and a separate user data directory. See the [CLI Guide](docs/guides/cli.md) for inspection tools.
 
-## Current Status
+## Platforms
 
-See [Current Status](docs/status.md) for capabilities, game validation scope, and major gaps. All documented samples are listed in the [Game Archive](docs/games/README.md).
+| Platform | Target |
+|---|---|
+| Windows / Linux / MacOS | Host |
+| iOS | aarch64-apple-ios |
+| Android | aarch64-linux-android, x86_64-linux-android |
+| Web | wasm32-unknown-unknown |
+| Switch | aarch64-switch |
+| PS Vita | armv7-sony-vita-newlibeabihf |
 
 ## Documentation and Development
 
+- [Current Status](docs/status.md)
+- [Game Archive](docs/games/README.md)
 - [Documentation Index and Archiving Rules](docs/README.md): find documentation by purpose.
 - [Architecture](docs/architecture.md) and [Workspace](docs/workspace.md): module responsibilities, dependencies, and the full set of validation commands.
 - [Research Guidelines](docs/research.md): evidence requirements and steps for adding support for a new game.

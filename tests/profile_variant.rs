@@ -14,8 +14,70 @@ const DERIVED: &str = include_str!("../crates/cmvs-core/profiles/cmvs-20171114.p
 const HASH: &str = "3bccda5d7611412c6938c0c9b06b2195914cfb78763a53f2c235bb6479395ee0";
 
 #[test]
+fn window_sequence_append_copies_names_and_preserves_results_at_capacity() {
+    let profile = Registry::builtin().profile("cmvs-20101211").unwrap();
+    let semantics = profile.semantics(0x28b);
+    assert_eq!(
+        semantics,
+        Semantics::Variant(VariantId::SequenceWindowImage)
+    );
+    assert!(!dispatch::ROOT.iter().any(|entry| entry.command == 0x28b));
+    let mut code = vec![];
+    for child in 0..18 {
+        command(&mut code, 0x228b, &[child, 0x8000_0003, 100]);
+    }
+    let script = script(&code);
+    let mut vm = Machine::new(&script).unwrap();
+    let mut sequence = cmvs_rs::sequence::SequenceHost::default();
+    vm.state_mut().set_string(3, b"first.pb3").unwrap();
+    vm.state_mut().set_system_integer(0, 77).unwrap();
+    for index in 0..17 {
+        pending(&mut vm);
+        let mut hosts = dispatch::Hosts {
+            sequence: Some(dispatch::SequenceHosts {
+                host: &mut sequence,
+                execution: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            dispatch::run(semantics, &mut vm, &mut hosts).unwrap(),
+            Some(dispatch::Flow::Done)
+        );
+        vm.state_mut().set_string(3, b"second.pb3").unwrap();
+        assert_eq!(sequence.header().count, (index + 1).min(16));
+        assert_eq!(vm.stack().len_bytes(), 0);
+        assert_eq!(vm.state().system_integer(0), Some(77));
+    }
+    assert!(
+        matches!(&sequence.entries()[0], Some(cmvs_rs::sequence::SequenceEntry::ReplaceWindowImage { child: 0, name, duration: 100, .. }) if name == b"first.pb3")
+    );
+    let entries = sequence.entries().clone();
+    vm.state_mut().set_string(3, b"x").unwrap();
+    pending(&mut vm);
+    // A full queue still resolves its string reference before discarding the append.
+    vm.state_mut().set_string(3, &[]).unwrap();
+    let mut hosts = dispatch::Hosts {
+        sequence: Some(dispatch::SequenceHosts {
+            host: &mut sequence,
+            execution: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        dispatch::run(semantics, &mut vm, &mut hosts).unwrap(),
+        Some(dispatch::Flow::Done)
+    );
+    assert_eq!(sequence.entries(), &entries);
+}
+
+#[test]
 fn inspected_early_queries_use_the_down_edge_and_extra_actions_can_be_consumed() {
     for (id, hash) in [
+        (
+            "cmvs-20101211",
+            "158409c71cf14c3dedb7d051585e5f48e56dbc621bb19e56d084cd4fe8d4352f",
+        ),
         (
             "cmvs-20071117",
             "caff7901a7dc4ec963d7fde358028cdd68dfd87fc7925c9715a20e7a5f36d02b",
@@ -23,6 +85,10 @@ fn inspected_early_queries_use_the_down_edge_and_extra_actions_can_be_consumed()
         (
             "cmvs-20080719",
             "afe3b3a895e7b3ba5f78e6f6464296f1d028e87307c8de5a568b88fd6086491e",
+        ),
+        (
+            "cmvs-20090815",
+            "36fa780a5d2b8df4ac6a6e48a2f78708b79aa10d22eb575a5ae74742d902f71a",
         ),
         (
             "cmvs-20080903",
@@ -135,25 +201,19 @@ fn font_cells_bindings_are_limited_to_the_inspected_commands() {
             .filter(|(_, binding)| binding.id == VariantId::FontCells)
             .map(|(command, _)| command)
             .collect();
-        let mut expected = vec![0x11d, 0x388, 0x38b, 0x3ac, 0x3b8, 0x3b9, 0x3bb];
-        if matches!(id, "cmvs-20211006" | "cmvs-20221105") {
-            expected.extend([0x10b, 0x152, 0x154, 0x157, 0x159]);
-            expected.sort_unstable();
-        }
-        assert_eq!(bindings, expected);
+        assert_eq!(
+            bindings,
+            [
+                0x10b, 0x11d, 0x152, 0x154, 0x157, 0x159, 0x388, 0x38b, 0x3ac, 0x3b8, 0x3b9, 0x3bb
+            ]
+        );
         assert_eq!(profile.status(0x3ac), CommandStatus::Unreviewed);
-        assert_eq!(
-            profile.semantics(0x3ac),
-            Semantics::Variant(VariantId::FontCells)
-        );
-        assert_eq!(
-            profile.semantics(0x10b),
-            if matches!(id, "cmvs-20211006" | "cmvs-20221105") {
+        for command in [0x10b, 0x3ac] {
+            assert_eq!(
+                profile.semantics(command),
                 Semantics::Variant(VariantId::FontCells)
-            } else {
-                Semantics::Root
-            }
-        );
+            );
+        }
         let binding = profile.variant(0x3ac).unwrap();
         assert_eq!(to_hex(&binding.binary_sha256), hash);
         let mut code = vec![];

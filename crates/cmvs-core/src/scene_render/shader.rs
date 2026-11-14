@@ -1,6 +1,6 @@
 //! Device-neutral parameters for GPU compositors executing [`Layer`] queues. The wgpu
-//! (WGSL) and Switch deko3d (GLSL) scene shaders share this uniform layout, read as
-//! `vec4 v[70]`:
+//! (WGSL), Switch deko3d (GLSL) and Vita GXM (Cg) scene shaders share this uniform
+//! layout, read as `vec4 v[70]`:
 //!
 //! | floats | meaning |
 //! |---|---|
@@ -120,6 +120,21 @@ pub fn shader_draw<'a>(command: &Layer<'a>, size: [u32; 2]) -> ShaderDraw<'a> {
             let [l, t, r, b] = quad.map(|v| v + 0.5);
             ([[l, t], [r, t], [l, b], [r, b]], *alpha, *blend)
         }
+        Layer::ProjectedMasked {
+            image,
+            rect,
+            quad,
+            alpha,
+            mask: m,
+            blend,
+        } => {
+            source = Some(&image.pixels);
+            mask = Some(*m);
+            p[4..8].copy_from_slice(&rect.map(|v| v as f32));
+            p[3] = 1.0;
+            let [l, t, r, b] = quad.map(|v| v + 0.5);
+            ([[l, t], [r, t], [l, b], [r, b]], *alpha, *blend)
+        }
         Layer::Rotated {
             image,
             rect,
@@ -128,7 +143,7 @@ pub fn shader_draw<'a>(command: &Layer<'a>, size: [u32; 2]) -> ShaderDraw<'a> {
             blend,
         } => {
             source = Some(&image.pixels);
-            p[4..8].copy_from_slice(&rect.map(|v| v as f32));
+            p[4..8].copy_from_slice(rect);
             p[3] = 1.0;
             (corners.map(|c| c.map(|v| v + 0.5)), *alpha, *blend)
         }

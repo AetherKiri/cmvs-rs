@@ -61,7 +61,6 @@ fn create(code: &mut Vec<u8>, slot: u32, text: u32, rect: [u32; 4]) {
 /// The text object 0x215d leaves after 0x14005d3b0, for a 1280x720 logical size.
 fn created_text(position: [i32; 2], size: [u32; 2]) -> TextObject {
     TextObject {
-        encoding: Default::default(),
         font_face: Vec::new(),
         face: cmvs_rs::settings::DEFAULT_FONT_FACE.into(),
         bold: false,
@@ -1064,7 +1063,7 @@ fn standalone_text_creation_uses_constructor_values_and_overwrites_in_place() {
 
 #[test]
 fn legacy_text_creation_reselects_named_and_default_faces_only_for_the_inspected_build() {
-    for name in ["cmvs-20071117", "cmvs-20080719"] {
+    for name in ["cmvs-20070119", "cmvs-20071117", "cmvs-20080719"] {
         let profile = cmvs_rs::profile::Registry::builtin().profile(name).unwrap();
         let mut code = vec![];
         call(&mut code, 0x2100, &[196, 1, 7]);
@@ -1105,6 +1104,43 @@ fn legacy_text_creation_reselects_named_and_default_faces_only_for_the_inspected
         assert!(messages.shared_message(&mut vm).is_err());
         assert!(!messages.font_present(8));
     }
+}
+
+#[test]
+fn hassaku_named_fonts_keep_the_twelve_slot_text_table() {
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20101211")
+        .unwrap();
+    for index in [8, 11, 12] {
+        let mut code = vec![];
+        call(&mut code, 0x2100, &[196, 1, index]);
+        let script = script_with_text(&code, b"\0MS Gothic\0");
+        let mut vm = Machine::new(&script).unwrap();
+        let mut messages = MessageHost::for_profile(profile);
+        pending(&mut vm);
+        assert_eq!(messages.shared_message(&mut vm).is_ok(), index < 12);
+        if index < 12 {
+            assert_eq!(
+                messages.text(index as usize).unwrap().face.as_ref(),
+                b"MS Gothic"
+            );
+            assert_eq!(vm.stack().len_bytes(), 0);
+        } else {
+            assert_eq!(vm.stack().len_bytes(), 12);
+        }
+    }
+    let mut changed = profile.clone();
+    for binary in &mut changed.binaries {
+        binary.sha256 = [0; 32];
+    }
+    let mut messages = MessageHost::for_profile(&changed);
+    let mut code = vec![];
+    call(&mut code, 0x2100, &[196, 1, 11]);
+    let script = script_with_text(&code, b"\0MS Gothic\0");
+    let mut vm = Machine::new(&script).unwrap();
+    pending(&mut vm);
+    assert!(messages.shared_message(&mut vm).is_err());
+    assert_eq!(vm.stack().len_bytes(), 12);
 }
 
 #[test]
@@ -4285,7 +4321,7 @@ fn run_font_cells(vm: &mut Machine<'_>, messages: &mut MessageHost, count: usize
 }
 
 #[test]
-fn kunado_measurement_and_all_main_output_paths_share_proportional_advances() {
+fn measurement_and_all_main_output_paths_share_proportional_advances() {
     #[derive(Debug)]
     struct Metrics;
     impl cmvs_rs::message::GlyphMetrics for Metrics {
@@ -4296,9 +4332,14 @@ fn kunado_measurement_and_all_main_output_paths_share_proportional_advances() {
             Ok(10)
         }
     }
-    for (profile, op) in ["cmvs-20211006", "cmvs-20221105"]
-        .into_iter()
-        .flat_map(|profile| [0x210b, 0x2152, 0x2154, 0x2157, 0x2159].map(|op| (profile, op)))
+    for (profile, op) in [
+        "cmvs-20190305",
+        "cmvs-20190405",
+        "cmvs-20211006",
+        "cmvs-20221105",
+    ]
+    .into_iter()
+    .flat_map(|profile| [0x210b, 0x2152, 0x2154, 0x2157, 0x2159].map(|op| (profile, op)))
     {
         let mut code = vec![];
         create(&mut code, 0, 1, [0, 0, 300, 100]);
@@ -4997,5 +5038,81 @@ fn inspected_window_children_share_the_table_for_draw_query_and_destroy() {
         assert!(messages.shared_message(&mut vm).is_err());
         assert_eq!(vm.stack().len_bytes(), 8);
         assert_eq!(vm.pending_system().unwrap().1, 0x178);
+    }
+}
+
+#[test]
+fn utf8_message_measurement_and_output_use_unicode_glyph_codes() {
+    for font_cells in [false, true] {
+        let mut code = vec![];
+        direct_output(&mut code);
+        call(&mut code, 0x211f, &[1, 1]);
+        call(&mut code, 0x210b, &[1, 1]);
+        let mut text = b"\0".to_vec();
+        text.extend("中é{漢/かん}\0".as_bytes());
+        let script = script_with_text(&code, &text);
+        let mut vm = Machine::new_with_encoding(&script, cmvs_rs::TextEncoding::Utf8).unwrap();
+        let mut messages = MessageHost::default();
+        messages.set_record_output(true);
+        if font_cells {
+            run_font_cells(&mut vm, &mut messages, 5);
+        } else {
+            run(&mut vm, &mut messages, 5);
+        }
+        // Wide characters count two cells whatever their encoded length.
+        assert_eq!(vm.state().system_integer(1), Some(6));
+        if font_cells {
+            run_font_cells(&mut vm, &mut messages, 1);
+        } else {
+            run(&mut vm, &mut messages, 1);
+        }
+        assert_eq!(
+            messages
+                .text(1)
+                .unwrap()
+                .glyphs
+                .iter()
+                .map(|g| g.code)
+                .collect::<Vec<_>>(),
+            [0x4e2d, 0x00e9, 0x6f22]
+        );
+        assert_eq!(vm.stack().len_bytes(), 0);
+    }
+}
+
+#[test]
+fn gbk_message_measurement_and_output_share_pairs_including_control_trails() {
+    for font_cells in [false, true] {
+        let mut code = vec![];
+        direct_output(&mut code);
+        call(&mut code, 0x211f, &[1, 1]);
+        call(&mut code, 0x210b, &[1, 1]);
+        // Backslash and ruby delimiters are also valid GBK trail bytes.
+        let script = script_with_text(&code, b"\0\xd6\xd0\xce\\{\xd6{/\xce}}\0");
+        let mut vm = Machine::new_with_encoding(&script, cmvs_rs::TextEncoding::Gbk).unwrap();
+        let mut messages = MessageHost::default();
+        messages.set_record_output(true);
+        if font_cells {
+            run_font_cells(&mut vm, &mut messages, 5);
+        } else {
+            run(&mut vm, &mut messages, 5);
+        }
+        assert_eq!(vm.state().system_integer(1), Some(6));
+        if font_cells {
+            run_font_cells(&mut vm, &mut messages, 1);
+        } else {
+            run(&mut vm, &mut messages, 1);
+        }
+        assert_eq!(
+            messages
+                .text(1)
+                .unwrap()
+                .glyphs
+                .iter()
+                .map(|g| g.code)
+                .collect::<Vec<_>>(),
+            [0xd6d0, 0xce5c, 0xd67b]
+        );
+        assert_eq!(vm.stack().len_bytes(), 0);
     }
 }

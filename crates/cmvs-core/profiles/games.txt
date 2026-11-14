@@ -1,6 +1,15 @@
 # Game records: data hashes identify a game; executables confirm the build of its profile.
 # Hashes are evidence from docs/games/<game>/; game files themselves never enter the repository.
 
+game puriring
+profile cmvs-20070119
+start data/pack/start.ps2 sha256=6e8f2a8b81065f5163cd7447a80002ed41e9f1067846cd38ecda7936f07e6064
+archive data/pack/script.cpz sha256=125070cfeb012eb35be04577196942c26cff76f0a52d1046d7a76a444ae1e140
+# This build has no 0x201d handler; no game ID is supplied by the startup script.
+game-id 0x00000000
+executable cmvs.exe sha256=5ce421db393cbc5ca443fa405c5a9e31c348416109cb1279d91718f490c0e602
+end
+
 game asukimi
 profile cmvs-20071117
 start data/pack/start.ps2 sha256=f92c0997c47900f9ae8fc1f388f04ed2688622274e22bd4bf76920af5fd46c0c
@@ -25,6 +34,31 @@ start data/pack/start.ps2 sha256=c224f482437395fc30503a3bc622221c246b295c4e2adc9
 archive data/pack/script.cpz sha256=4d2dae6ee1e310c2d6c78efefd03f2a1732619e6f49ce64840be99ca9c6fd6b8
 game-id 0x00000000
 executable cmvs.exe sha256=f77ecbfd39d1076c66915544d73b9c2d2c5876fbabeaef3d589050b6094d13ac
+end
+
+game memoria
+profile cmvs-20090815
+start data/pack/start.ps2 sha256=651436ed2fde5075259c9ebff4ae40d41530638e3f2094d33353318bd0e04826
+archive data/pack/script.cpz sha256=f041077362880c3d0bf82f7a44ba4311648c4119e18522f507dc1dcd59df305b
+game-id 0x00000000
+executable cmvs.exe sha256=36fa780a5d2b8df4ac6a6e48a2f78708b79aa10d22eb575a5ae74742d902f71a
+end
+
+game natsuuta
+profile cmvs-20100314
+start data/pack/start.ps2 sha256=44b7b03d4b402675c9375a2844f2a42dd13f6b36150bfd76086403c9fd9741b1
+archive data/pack/script.cpz sha256=96234e92f5a2995543d9e341181253cacf741a70d5180de4fe701525aa264d5a
+game-id 0x17300001
+executable cmvs32.exe sha256=97575da34a284fa534084ca8452741e0e176650f3396308f92c2c8cf7ffc9bc8
+end
+
+game hassaku
+profile cmvs-20101211
+start data/pack/start.ps2 sha256=43f70567b72c0ec52561caffe51731cf92cde76abdcd58a018e93ccb4044aabb
+archive data/pack/script.cpz sha256=c1519a12a43618b290c62d0a550303ee16c94275c382762f2ebd2e59f0523bc9
+game-id 0x17300001
+executable cmvs64.exe sha256=158409c71cf14c3dedb7d051585e5f48e56dbc621bb19e56d084cd4fe8d4352f
+executable cmvs32.exe sha256=88a6a42d39c6879f0a8ebb9c593ef2263d87d49f6e2a3cdeb37dde526f3bacb9
 end
 
 game miranosu

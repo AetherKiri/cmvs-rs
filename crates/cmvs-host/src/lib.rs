@@ -118,14 +118,14 @@ impl Player {
             );
         }
         let game = Registry::builtin().identify_game(root, None)?;
-        let font =
-            FontRenderer::read(font_path, 0)?.with_encoding(cmvs_core::patch::text_encoding(root)?);
+        let encoding = cmvs_core::patch::text_encoding(root)?;
+        let font = FontRenderer::read(font_path, 0)?.with_text_encoding(encoding);
         let profile = open_profile()?;
         font.set_user_directory(profile.directory())?;
         let script = load_start(root, &game.files)?;
         let mut audio_control = None;
         let session = Session::try_new(script, |script| -> Result<Startup<'_>, Box<dyn Error>> {
-            let mut startup = Startup::new(script, root, &game, 0)?;
+            let mut startup = Startup::new_with_encoding(script, root, &game, 0, encoding)?;
             startup.set_save_profile(profile)?;
             startup.set_save_clock(Box::new(cmvs_core::runner::utc_save_time));
             startup.set_record_text(true);
@@ -139,6 +139,9 @@ impl Player {
                 startup.set_audio_backend(Box::new(audio))?;
             }
             startup.set_decode_movie_frames(true);
+            startup.set_mgv_factory(Box::new(cmvs_video::PrefetchTheoraFactory::default()));
+            startup.set_scene_prefetch(|| {});
+            startup.set_decoded_image_cache(256 << 20);
             Ok(startup)
         })?;
         let startup = session.borrow_dependent();
@@ -169,6 +172,20 @@ impl Player {
             paused: false,
             serial: 0,
             audio: audio_control,
+        })
+    }
+    /// Request a fresh library launch before the first tick. Only recorded games
+    /// with a verified startup auto-load flag need this policy; other games are
+    /// unchanged. Save files and explicit in-game load operations are preserved.
+    pub fn skip_auto_resume(&mut self) -> Result<(), &'static str> {
+        self.session.with_dependent_mut(|_, startup| {
+            let supported = startup
+                .gate()
+                .selection()
+                .record
+                .and_then(|record| record.skip_auto_resume)
+                .is_some();
+            startup.set_skip_auto_resume(supported)
         })
     }
     pub fn key(&mut self, code: usize, pressed: bool) -> Result<(), &'static str> {

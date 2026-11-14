@@ -145,7 +145,7 @@ impl Quake {
         done
     }
 
-    /// HAROUSE 0x43b1a3: each whole period toggles +16. Since it starts at
+    /// HAROUSE 0x43b1a3 and MEMORIA 0x43e3e3: each whole period toggles +16. Since it starts at
     /// zero and steps increments in the same loop, its value is steps & 1.
     fn triangle(&mut self) -> bool {
         let mut done = false;
@@ -231,7 +231,7 @@ impl SceneHost {
     /// while SP-4 is nonzero; pops 4. 0x2229 / 0x14007adf0: frees the quake. 0x2226 and
     /// 0x2229 return 0x4000. Waveforms the scripts never use stay unmodeled errors: 0x100 and
     /// step direction 0x20, whose rand() shares the CRT state with 0x20d4. The
-    /// inspected HAROUSE build additionally enables the 0x100 triangle waveform.
+    /// inspected HAROUSE and MEMORIA builds additionally enable the 0x100 triangle waveform.
     pub fn try_handle_quake(&mut self, vm: &mut Machine<'_>) -> Result<bool, DecodeError> {
         let Some((pc, command @ (0x20c | 0x225..=0x227 | 0x229))) = vm.pending_system() else {
             return Ok(false);
@@ -262,7 +262,18 @@ impl SceneHost {
                     call.argument(12, "period")?,
                     call.argument(16, "count")?,
                 );
+                // cmvs-20070119 0x42b9d0 runs the triangle wave for every nonzero waveform
+                // nibble; other directions leave the offset. Stored as 0x100 here.
+                let mode = if self.allow_legacy_triangle_quake && mode & 0xf00 != 0 {
+                    if period == 0 {
+                        return Err(error(pc, op, "triangle quake needs a nonzero period"));
+                    }
+                    mode & !0xf00 | 0x100
+                } else {
+                    mode
+                };
                 match mode & 0xf00 {
+                    0x100 if self.allow_legacy_triangle_quake => {}
                     0x100 if self.allow_triangle_quake && matches!(mode & 0xf0, 0 | 0x10) => {
                         if period == 0 {
                             return Err(error(pc, op, "triangle quake needs a nonzero period"));

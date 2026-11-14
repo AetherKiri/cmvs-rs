@@ -143,6 +143,15 @@ unsafe fn open(
     }
 }
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn cmvs_host_skip_auto_resume(handle: *mut Handle) -> i32 {
+    unsafe { handle.as_mut() }.map_or(-1, |h| {
+        h.run(|p| {
+            p.skip_auto_resume()?;
+            Ok(0)
+        })
+    })
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn cmvs_host_destroy(handle: *mut Handle) {
     if !handle.is_null() {
         drop(unsafe { Box::from_raw(handle) });
@@ -259,8 +268,10 @@ mod tests {
     fn unopened_handles_and_null_paths_fail_without_panicking() {
         unsafe {
             assert_eq!(cmvs_host_tick(std::ptr::null_mut(), 16), -1);
+            assert_eq!(cmvs_host_skip_auto_resume(std::ptr::null_mut()), -1);
             let h = cmvs_host_create();
             assert_eq!(cmvs_host_tick(h, 16), -1);
+            assert_eq!(cmvs_host_skip_auto_resume(h), -1);
             assert_eq!(cmvs_host_width(h), 0);
             assert!(cmvs_host_pixels(h).is_null());
             assert_eq!(

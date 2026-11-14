@@ -290,7 +290,7 @@ fn wait_yields_while_shaking_or_stops_at_once_without_input() {
 }
 
 #[test]
-fn unmodeled_waveforms_bad_arguments_and_fades_under_offsets_are_errors() {
+fn invalid_quakes_fail_and_fade_overlays_follow_slot_offsets() {
     for code in [
         quake_code(0x20, 3, 10, 1),
         quake_code(0x100, 3, 10, 1),
@@ -311,14 +311,25 @@ fn unmodeled_waveforms_bad_arguments_and_fades_under_offsets_are_errors() {
         assert_eq!(vm.stack().len_bytes(), bytes);
         assert!(scene.quake().is_none());
     }
-    // A colour fade is a layer 0 item whose shaken extent is unverified.
-    let mut code = vec![];
-    command(&mut code, 0x2220, &[0, 0, 100, 0]);
-    code.extend(quake_code(0x01, 1, 10, u32::MAX));
-    let mut scene = scene_of(&code, 2);
-    assert!(scene_render::render(&scene, 4, 1).is_ok());
-    scene.advance_frame(10);
-    assert!(scene_render::render(&scene, 4, 1).is_err());
+    // The fade follows slot quake offsets, retaining its screen-sized extent.
+    for mode in [0x01, 0x11, 0x02] {
+        let mut code = vec![];
+        command(&mut code, 0x2220, &[0, 0x00ff0000, 100, 0]);
+        code.extend(quake_code(mode, 1, 10, u32::MAX));
+        let mut scene = scene_of(&code, 2);
+        scene.advance_frame(10);
+        let image = scene_render::render(&scene, 4, 2).unwrap();
+        let alpha = scene.fade().current().unwrap().opacity as u8;
+        assert!(alpha > 0);
+        for (index, pixel) in image.pixels().as_chunks::<4>().0.iter().enumerate() {
+            let clipped = match mode {
+                0x01 => index % 4 == 0,
+                0x11 => index < 4,
+                _ => false, // Mode 2 shakes windows only, not the fade.
+            };
+            assert_eq!(pixel, &[if clipped { 0 } else { alpha }, 0, 0, 255]);
+        }
+    }
 }
 
 #[test]
@@ -344,10 +355,15 @@ fn pause_query_reports_a_paused_quake_only() {
 }
 
 #[test]
-fn triangle_quake_requires_the_inspected_harouse_build_and_nonzero_period() {
-    let profile = cmvs_rs::profile::Registry::builtin()
-        .profile("cmvs-20080719")
-        .unwrap();
+fn triangle_quake_requires_an_inspected_build_and_nonzero_period() {
+    // HAROUSE 0x43b0b0 and MEMORIA 0x43e2f0 share the triangle branch.
+    let registry = cmvs_rs::profile::Registry::builtin();
+    for id in ["cmvs-20080719", "cmvs-20090815"] {
+        triangle_quake_gate(registry.profile(id).unwrap());
+    }
+}
+
+fn triangle_quake_gate(profile: &cmvs_rs::profile::EngineProfile) {
     let code = quake_code(0x102, 24, 80, 3);
     let program = script(&code);
     let mut vm = Machine::new(&program).unwrap();

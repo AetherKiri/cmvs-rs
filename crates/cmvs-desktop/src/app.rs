@@ -30,6 +30,30 @@ use winit::{
     window::{Window, WindowId},
 };
 
+fn warp_native_cursor(
+    window: &Window,
+    event_loop: &ActiveEventLoop,
+    point: [f64; 2],
+) -> Result<(), winit::error::ExternalError> {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        use winit::platform::wayland::ActiveEventLoopExtWayland;
+        if event_loop.is_wayland() {
+            // Normal Wayland windows cannot warp the system cursor. GameInput::warp
+            // has already retained the navigation point for subsequent engine frames.
+            return Ok(());
+        }
+    }
+    let _ = event_loop;
+    window.set_cursor_position(winit::dpi::PhysicalPosition::new(point[0], point[1]))
+}
+
 const USAGE: &str = "\
 Usage: cmvs-desktop <game-root> --encoding <auto|shift-jis|gbk|utf-8> [options]
 
@@ -37,13 +61,13 @@ Open a native research preview. Game files are read only.
 
 Required:
   --encoding <name>       auto, shift-jis, gbk or utf-8
-                         auto infers from startup script text and prints the result;
+                         auto infers from game script text and prints the result;
                          ambiguous samples require an explicit encoding
 
 Display, text and audio:
   --renderer <name>       cpu (default) or wgpu (needs wgpu-renderer build feature)
   --font <file>           OpenType font file or collection for message rendering
-                         requires shift-jis; cannot combine with --record-text
+                         supports shift-jis, gbk and utf-8; cannot combine with --record-text
   --font-face <index>     zero-based collection face; requires --font (default 0)
   --record-text          record glyphs and reveal timing without drawing text
   --audio <name>          record (default) or native (needs audio-output build feature)
@@ -79,9 +103,9 @@ Build:
 
 Notes:
   Without --font or --record-text, message output stops at a barrier.
-  --font currently renders Shift-JIS only; encoding selection does not add GBK/UTF-8
-  message rendering. Glyph pixels differ from the original GDI backend.
-  Auto detection samples complete strings in the first 256 KiB of startup text.
+  Playback supports Shift-JIS, GBK and UTF-8, including message rendering.
+  Glyph pixels differ from the original GDI backend.
+  Auto detection samples startup text, then up to 32 archived scripts if uncertain.
   Known game builds are identified from scripts, archives and executable hashes.
   Presumed/unreviewed commands run by default; absent/no-op commands always stop.
   Save snapshots are built at main entry and scenario points. Unsupported snapshot
@@ -207,10 +231,11 @@ impl App<'_> {
         let mode = if self.preview_image.is_some() {
             1
         } else {
-            cmvs_core::viewport::presentation_mode(
+            cmvs_core::viewport::presentation_mode_with_full_move(
                 window.fullscreen().is_some(),
                 self.aspect_scaling.get(),
                 self.aspect_mode.get(),
+                self.startup.platform().window_full_move(),
             )
         };
         if gpu.presenter.present(
@@ -252,25 +277,24 @@ impl App<'_> {
         let surface = self.surface.as_mut().ok_or("no surface")?;
         surface.resize(w, h)?;
         let mut buffer = surface.buffer_mut()?;
-        for (i, pixel) in buffer.iter_mut().enumerate() {
-            let x = i % size.width as usize;
-            let y = i / size.width as usize;
-            *pixel = if (x / 32 + y / 32).is_multiple_of(2) {
-                0x263447
-            } else {
-                0x2c3c50
-            };
-        }
-        if self.preview_image.is_none() {
-            buffer.fill(0);
-        }
         if self.preview_image.is_some() {
+            for (i, pixel) in buffer.iter_mut().enumerate() {
+                let x = i % size.width as usize;
+                let y = i / size.width as usize;
+                *pixel = if (x / 32 + y / 32).is_multiple_of(2) {
+                    0x263447
+                } else {
+                    0x2c3c50
+                };
+            }
             image.draw_fit(&mut buffer, size.width, size.height)?;
         } else {
-            let mode = cmvs_core::viewport::presentation_mode(
+            buffer.fill(0);
+            let mode = cmvs_core::viewport::presentation_mode_with_full_move(
                 window.fullscreen().is_some(),
                 self.aspect_scaling.get(),
                 self.aspect_mode.get(),
+                self.startup.platform().window_full_move(),
             );
             image.draw_scaled(
                 &mut buffer,
@@ -569,10 +593,11 @@ impl ApplicationHandler for App<'_> {
             self.next_frame = now + Duration::from_millis(16);
             let window = window.clone();
             self.game_input
-                .set_aspect_mode(cmvs_core::viewport::presentation_mode(
+                .set_aspect_mode(cmvs_core::viewport::presentation_mode_with_full_move(
                     window.fullscreen().is_some(),
                     self.aspect_scaling.get(),
                     self.aspect_mode.get(),
+                    self.startup.platform().window_full_move(),
                 ));
             if self.input_due && self.native_input && self.preview_image.is_none() {
                 let size = window.inner_size();
@@ -711,16 +736,16 @@ impl ApplicationHandler for App<'_> {
                 return;
             }
             self.game_input
-                .set_aspect_mode(cmvs_core::viewport::presentation_mode(
+                .set_aspect_mode(cmvs_core::viewport::presentation_mode_with_full_move(
                     window.fullscreen().is_some(),
                     self.aspect_scaling.get(),
                     self.aspect_mode.get(),
+                    self.startup.platform().window_full_move(),
                 ));
             if let Some(point) = self.startup.input_mut().take_warp() {
                 let size = window.inner_size();
-                if let Some([x, y]) = self.game_input.warp([size.width, size.height], point)
-                    && let Err(error) =
-                        window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y))
+                if let Some(position) = self.game_input.warp([size.width, size.height], point)
+                    && let Err(error) = warp_native_cursor(&window, el, position)
                 {
                     self.fail(el, error);
                     return;
@@ -910,13 +935,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     if font_face.is_some() && font_path.is_none() {
         return Err("--font-face requires --font".into());
     }
-    if font_path.is_some()
-        && (record_text
-            || matches!(choice, EncodingChoice::Explicit(encoding) if encoding == TextEncoding::Utf8))
-    {
-        return Err(
-            "--font requires Shift-JIS or a GBK PKP overlay and cannot be combined with --record-text".into(),
-        );
+    if font_path.is_some() && record_text {
+        return Err("--font cannot be combined with --record-text".into());
     }
     if system_save_output.is_some() && user_data_dir.is_some() {
         return Err("--user-data-dir and --system-save-output are mutually exclusive".into());
@@ -930,39 +950,33 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("{line}");
     }
     let script = load_start(root.as_ref(), &game.files)?;
-    let glyph_encoding = cmvs_core::patch::text_encoding(&root)?;
-    let encoding = if glyph_encoding == cmvs_core::text_encoding::TextEncoding::Gbk {
-        println!("# PKP translation overlay: GBK script and glyph encoding");
-        TextEncoding::Gbk
-    } else {
-        choice.resolve(script.text())?
+    let pkp_title = cmvs_core::patch::text_encoding(&root)? == cmvs_core::TextEncoding::Gbk;
+    let encoding = match choice.resolve(script.text()) {
+        _ if choice == EncodingChoice::Auto && pkp_title => TextEncoding::Gbk,
+        Err(_) if choice == EncodingChoice::Auto => {
+            let encoding = cmvs_font::text_codec::detect_game(&root, &game.files, &script)?;
+            TextEncoding::parse(cmvs_font::text_codec::name(encoding))?
+        }
+        result => result?,
     };
-    if choice == EncodingChoice::Auto
-        && glyph_encoding != cmvs_core::text_encoding::TextEncoding::Gbk
-    {
+    if choice == EncodingChoice::Auto {
         let name = match encoding {
             TextEncoding::ShiftJis => "shift-jis",
             TextEncoding::Gbk => "gbk",
             TextEncoding::Utf8 => "utf-8",
         };
         println!(
-            "# auto encoding={name}; inferred from startup script text; override with --encoding <name> if incorrect"
+            "# auto encoding={name}; inferred from game script text; override with --encoding <name> if incorrect"
         );
     }
-    if font_path.is_some()
-        && (record_text
-            || (encoding != TextEncoding::ShiftJis
-                && glyph_encoding != cmvs_core::text_encoding::TextEncoding::Gbk))
-    {
-        return Err(
-            "--font requires Shift-JIS or a GBK PKP overlay and cannot be combined with --record-text".into(),
-        );
-    }
+    let engine_encoding = encoding.engine_encoding();
     let font = font_path
         .as_ref()
-        .map(|path| crate::font::FontRenderer::read(path, font_face.unwrap_or(0)))
-        .transpose()?
-        .map(|font| font.with_encoding(glyph_encoding));
+        .map(|path| {
+            crate::font::FontRenderer::read(path, font_face.unwrap_or(0))
+                .map(|font| font.with_text_encoding(engine_encoding))
+        })
+        .transpose()?;
     let bindings = if native_input {
         use std::io::Read;
         let mut text = String::new();
@@ -997,7 +1011,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         _ => return Err("preview-image and image-archive must be supplied together".into()),
     };
-    let mut startup = Startup::new(&script, root.as_ref(), &game, 0)?;
+    let mut startup =
+        Startup::new_with_encoding(&script, root.as_ref(), &game, 0, engine_encoding)?;
     startup.set_block_unreviewed(block_unreviewed);
     startup.set_block_presumed(block_presumed);
     if !block_presumed {
@@ -1016,7 +1031,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
     }
     startup.set_decode_movie_frames(true);
-    startup.set_mgv_factory(Box::new(crate::video::TheoraFactory));
+    startup.set_mgv_factory(Box::new(crate::video::PrefetchTheoraFactory::default()));
+    startup.set_scene_prefetch(|| {});
+    startup.set_decoded_image_cache(256 << 20);
     if native_audio {
         #[cfg(feature = "audio-output")]
         {
@@ -1044,7 +1061,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if font.is_some() {
         println!(
-            "# OpenType font preview enabled; explicit font file, game text encoding; glyph masks differ from GDI"
+            "# OpenType font preview enabled; explicit font file, encoding={encoding:?}, supported single-line layout; glyph masks differ from GDI"
         );
     }
     if record_text {
@@ -1075,7 +1092,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         startup,
         assets: DirectoryAssets::new(&root)?,
         encoding,
-        pkp_title: glyph_encoding == cmvs_core::text_encoding::TextEncoding::Gbk,
+        pkp_title,
         input: DesktopInput::default(),
         game_input,
         bindings,

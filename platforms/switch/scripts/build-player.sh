@@ -14,7 +14,9 @@ for unit in window gpu audio system libc keyboard; do
         -Wall -Wextra -Werror -O2 -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -I"$DEVKITPRO/libnx/include"
 done
 "$DEVKITA64/bin/aarch64-none-elf-gcc" -c platforms/switch/runtime/abi.c -o platforms/switch/build/abi.o
+# Whole-program optimization: slower to build, a few percent faster in the VM and decoders.
 cargo +nightly-2026-01-20 rustc --config 'patch.crates-io.libc.path="platforms/switch/build/libc-0.2.178"' \
+    --config 'profile.release.lto="fat"' --config 'profile.release.codegen-units=1' \
     -p cmvs-switch --release --target platforms/switch/toolchain/aarch64-switch.json -Zbuild-std=std,panic_abort -- \
     -C "linker=$PWD/platforms/switch/toolchain/linker.py" \
     -C "link-arg=-specs=$DEVKITPRO/libnx/switch.specs" \
@@ -26,5 +28,5 @@ cargo +nightly-2026-01-20 rustc --config 'patch.crates-io.libc.path="platforms/s
     -C "link-arg=$PWD/platforms/switch/build/libc.o" \
     -C "link-arg=$PWD/platforms/switch/build/keyboard.o" \
     -C "link-arg=-L$DEVKITPRO/libnx/lib" -C link-arg=-ldeko3d -C link-arg=-lnx -C link-arg=-lm
-"$DEVKITPRO/tools/bin/nacptool" --create 'CMVS Switch' 'cmvs-rs' '0.1.0' platforms/switch/build/cmvs-switch.nacp
+"$DEVKITPRO/tools/bin/nacptool" --create 'CMVS Switch' 'cmvs-rs' "${CMVS_VERSION:-0.1.0}" platforms/switch/build/cmvs-switch.nacp
 "$DEVKITPRO/tools/bin/elf2nro" target/aarch64-switch/release/cmvs-switch platforms/switch/build/cmvs-switch.nro --nacp=platforms/switch/build/cmvs-switch.nacp

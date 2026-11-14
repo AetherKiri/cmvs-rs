@@ -95,17 +95,25 @@ pub enum Event {
 pub struct StartLog {
     pub scripts: Vec<String>,
     pub advances: u64,
+    /// Decide presses after quiet frames; only with the manifest's `start-route`.
+    pub nudges: u64,
     pub last: Option<Observation>,
 }
 
 /// Advances every message wait until the first settled page. Nothing here knows which
 /// script shows the title; the first settled page is the start page by definition.
+///
+/// With the manifest's `start-route`, a first launch that plays a route before its title
+/// is driven like a scenario: skip is held and quiet input polls get the same nudge.
 pub fn drive_to_start(
     session: &mut Session<'_>,
     log: &mut StartLog,
 ) -> Result<PageSignature, Stop> {
+    let route = session.manifest().is_some_and(|m| m.start_route());
+    let skip = route && hold_skip(session);
     let mut settle = Settle::new(STABLE_FRAMES);
-    loop {
+    let mut quiet_since = session.yields();
+    let page = loop {
         let observation = session.frame()?;
         let name = observation.script.escape_ascii().to_string();
         if !log.scripts.contains(&name) {
@@ -114,13 +122,28 @@ pub fn drive_to_start(
         if observation.waiting_for_advance() && !session.busy() {
             session.act(Action::Advance).map_err(Stop::Error)?;
             log.advances += 1;
+            quiet_since = observation.yields;
+        } else if route
+            && !session.busy()
+            && !observation.page.interactive()
+            && !session.startup().movies().has_player()
+            && observation.yields - quiet_since >= NUDGE_FRAMES
+        {
+            session.act(Action::Advance).map_err(Stop::Error)?;
+            log.nudges += 1;
+            session.note("nudge", Json::Null);
+            quiet_since = observation.yields;
         }
         let settled = settle.feed(&observation).cloned();
         log.last = Some(observation);
         if let Some(page) = settled {
-            return Ok(page);
+            break page;
         }
+    };
+    if skip {
+        session.hold(Vec::new());
     }
+    Ok(page)
 }
 
 pub struct Scenario {
@@ -135,6 +158,7 @@ pub struct Scenario {
     settle: Settle,
     quiet_since: u64,
     in_scenario: bool,
+    advancing_wait: bool,
     pub advances: u64,
     pub nudges: u64,
 }
@@ -174,6 +198,7 @@ impl Scenario {
             settle: Settle::new(STABLE_FRAMES),
             quiet_since: session.yields(),
             in_scenario,
+            advancing_wait: false,
             advances: 0,
             nudges: 0,
         }
@@ -184,6 +209,7 @@ impl Scenario {
     /// Advances the current message wait.
     pub fn advance(&mut self, session: &mut Session<'_>) -> Result<(), Stop> {
         session.act(Action::Advance).map_err(Stop::Error)?;
+        self.advancing_wait = true;
         self.advances += 1;
         self.quiet_since = session.yields();
         Ok(())
@@ -228,7 +254,15 @@ impl Scenario {
                 return Ok(None);
             }
             let o = session.frame()?;
-            if o.waiting_for_advance() {
+            if !o.in_message_wait() {
+                self.advancing_wait = false;
+            }
+            // Re-observing a wait (e.g. immediately after saving) must still
+            // return it after the VM advances its repeat counter beyond two.
+            if o.in_message_wait() {
+                if self.advancing_wait {
+                    continue;
+                }
                 if !self.in_scenario && self.skip && hold_skip(session) {
                     session.note("skip-held", Json::Null);
                 }

@@ -20,10 +20,13 @@ SD 卡目录 `switch/cmvs-rs/`：
 ```text
 cmvs-switch.nro
 games/<任意名称>/   每个目录放一个原始游戏
+  encoding.txt      可选，游戏文字编码 shift-jis、gbk 或 utf-8；缺省从启动脚本自动检测
 game/               旧的单游戏目录，仍可用，列在最前
-font.ttf            可选，字体索引 0；缺省用系统共享字体
+font.ttf            可选，字体索引 0；缺省按游戏编码用系统共享字体
 renderer.txt        可选，gpu（缺省）或 cpu
 ```
+
+游戏文字编码（Shift-JIS、GBK、UTF-8）先从启动脚本检测，证据不足时再采样资源包内最多 32 个脚本，仍无法判断时会报错，在该游戏目录放 `encoding.txt` 写明编码即可。没有 `font.ttf` 时，GBK 和 UTF-8 游戏（多为中文补丁）以系统简体中文共享字体为主、日文为后备，Shift-JIS 游戏只用日文字体。
 
 程序生成：`users/<游戏标识>/`（用户数据，同一游戏的多个目录共用）、`last-game.txt`（上次启动的游戏）、`error.log`（最近一次错误）。
 
@@ -68,12 +71,13 @@ renderer.txt        可选，gpu（缺省）或 cpu
 | GPU 画面 | `runtime/gpu.c` 用 deko3d 执行与 cmvs-wgpu 相同的绘制队列（参数布局见 `cmvs_core::scene_render::shader`）；`runtime/shaders/*.glsl` 移植自 wgpu 着色器，构建时由 `uam` 编译嵌入。逻辑画布按显示设置缩放到 1280×720 交换链（双缓冲、垂直同步）。纹理按内容缓存，上限 128 MiB、LRU 淘汰；影片帧不进缓存。每帧开始时回收上一帧内存，GPU 与下一段 VM 执行重叠；截图只在引擎请求时读回 |
 | CPU 画面 | 核心软件合成后写入 1280×720 线性帧缓冲 |
 | 加载提频 | 启动及 VM 连续 50 ms 未产出画面时请求 FastLoad（CPU 1785 MHz，系统同时把 GPU 降到最低），画面正常 500 ms 后恢复。只计 VM 时间，失焦时不提频，系统拒绝后不再尝试 |
+| MGV 视频 | 核心 2 预解码 YUV420，缓冲上限 192 MiB / 144 帧；按音频时钟取帧，仅显示时转换 RGBA，缓存命中不等待后续包 |
 | 音频 | `cmvs-audio` 的 `mixer` 模式，专用线程在 CPU 核心 1 以 48 kHz 立体声写入 audout，最多约 85 ms 排队 |
 | 文本输入 | 系统软键盘，上限沿用桌面宿主（最多 127 个全角字）；按 Shift-JIS 保存，无法表示的字符在键盘内要求修改；与原版一致只保留全角字符 |
 | 菜单与错误页 | CPU 绘制（`ab_glyph`），经当前渲染器显示 |
 | 运行时补丁 | `runtime/libc.c` 补上 Rust std 所需而 newlib 缺少的 `sysconf` / `getrandom` |
 
-输入、列表、错误页、提频与软键盘编码的逻辑可在开发机上 `cargo test -p cmvs-switch`。`menu_preview` / `error_preview` 两个忽略测试可把页面渲染为 PNG（需 `CMVS_MENU_FONT` 指定字体）。
+输入、列表、错误页、提频与软键盘编码的逻辑可在开发机上 `cargo test -p cmvs-console -p cmvs-switch`；前四项与 PS Vita 共用 `cmvs-console`。`cmvs-console` 的 `menu_preview` / `error_preview` 两个忽略测试可把页面渲染为 PNG（需 `CMVS_MENU_FONT` 指定字体）。
 
 暂未接入字体选择对话框。
 
